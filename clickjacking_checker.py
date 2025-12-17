@@ -1,5 +1,6 @@
 import requests
 import argparse
+from urllib.parse import urlparse
 
 def check_clickjacking(url):
     """
@@ -29,11 +30,15 @@ def check_clickjacking(url):
 
 def main():
     parser = argparse.ArgumentParser(description="Check for Clickjacking vulnerability.")
-    parser.add_argument("url", help="The target URL to analyze.")
+    parser.add_argument("url", help="The target URL or domain to analyze (e.g., example.com).")
     args = parser.parse_args()
 
+    target_url = args.url
+    if not urlparse(target_url).scheme:
+        target_url = "http://" + target_url
+
     requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
-    check_clickjacking(args.url)
+    check_clickjacking(target_url)
 
 if __name__ == "__main__":
     main()

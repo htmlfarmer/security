@@ -2,6 +2,7 @@ import argparse
 import subprocess
 import sys
 import os
+from typing import List
 
 # A dictionary to map test names to their script files.
 # This makes it easy to add new scripts later.
@@ -12,25 +13,39 @@ SCRIPTS = {
     "xss": "xss_scanner.py",
     "links": "link_checker.py",
     "clickjacking": "clickjacking_checker.py",
+    "dns": "dns_whois_nslookup_checker.py",
+    "screenshot": "screenshot_taker.py",
+    "insecure-forms": "insecure_form_checker.py",
+    "dom-xss": "dom_xss_scanner.py",
 }
 
 # Define which scripts belong to each audit level.
 AUDIT_LEVELS = {
-    "basic": ["tech", "headers", "clickjacking", "links"],
-    "advanced": ["subdomain"],
-    "extreme": ["xss"]
+    "basic": ["tech", "headers", "clickjacking", "links", "dns", "screenshot"],
+    "advanced": ["subdomain", "insecure-forms"],
+    "extreme": ["xss", "dom-xss"]
 }
 
-def run_script(script_name, target_url):
+# A list of keywords that indicate a potential vulnerability in a script's output.
+VULNERABILITY_KEYWORDS = [
+    "VULNERABILITY:",
+    "Missing Header:",
+    "Broken Link Found:",
+    "Unreachable Link Found:",
+]
+
+def run_script(script_name, target_url) -> List[str]:
     """
-    Runs a specified security script against a target URL using subprocess.
+    Runs a specified security script and captures its output to find vulnerabilities.
+    Returns a list of strings, where each string is a reported vulnerability.
     """
     script_path = os.path.join(os.path.dirname(__file__), SCRIPTS[script_name])
+    findings = []
 
     if not os.path.exists(script_path):
         print(f"\n--- [ERROR: Script not found for '{script_name.upper()}'] ---")
         print(f"File not found: {script_path}")
-        return
+        return findings
 
     print(f"\n--- [RUNNING: {script_name.upper()}] ---")
     try:
@@ -46,6 +61,15 @@ def run_script(script_name, target_url):
         )
         
         print(result.stdout)
+        
+        # Parse output for vulnerabilities
+        for line in result.stdout.splitlines():
+            for keyword in VULNERABILITY_KEYWORDS:
+                if keyword in line:
+                    # Add a descriptive header for the finding
+                    findings.append(f"[{script_name.upper()}] {line.strip()}")
+                    break # Move to the next line once a keyword is found
+
         if result.stderr:
             print("--- STDERR ---")
             print(result.stderr)
@@ -60,6 +84,8 @@ def run_script(script_name, target_url):
         print(f"Error: The script '{script_name}' timed out after 60 seconds.")
     except Exception as e:
         print(f"An unexpected error occurred while running {script_name}: {e}")
+    
+    return findings
 
 def main():
     parser = argparse.ArgumentParser(
@@ -90,6 +116,7 @@ def main():
     target_url = args.url
     tests_to_run = []
     audit_level_msg = "custom"
+    all_findings = []
 
     if args.tests:
         # User specified individual tests
@@ -117,9 +144,22 @@ def main():
     
     for test in tests_to_run:
         if test in SCRIPTS:
-            run_script(test, target_url)
+            findings = run_script(test, target_url)
+            if findings:
+                all_findings.extend(findings)
         else:
             print(f"\n--- [WARNING: Test '{test}' is defined in a level but has no corresponding script] ---")
+
+    print("\n\n-----------------------------------------")
+    print("--- IMPORTANT SECURITY FINDINGS SUMMARY ---")
+    print("-----------------------------------------")
+    if all_findings:
+        print("The following potential issues were identified:")
+        for finding in all_findings:
+            print(f"  * {finding}")
+    else:
+        print("No significant vulnerabilities were automatically detected based on the checks performed.")
+
 
     print("\n--- [AUDIT COMPLETE] ---")
 

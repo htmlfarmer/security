@@ -1,6 +1,6 @@
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import argparse
 
 def scan_xss(url):
@@ -56,9 +56,14 @@ def scan_xss(url):
 
 def main():
     parser = argparse.ArgumentParser(description="Basic Reflected XSS scanner for forms.")
-    parser.add_argument("url", help="The target URL to scan.")
+    parser.add_argument("url", help="The target URL or domain to scan (e.g., example.com).")
     args = parser.parse_args()
-    scan_xss(args.url)
+
+    target_url = args.url
+    if not urlparse(target_url).scheme:
+        target_url = "http://" + target_url
+        
+    scan_xss(target_url)
 
 if __name__ == "__main__":
     main()

@@ -10,7 +10,7 @@ This list is divided into three audit levels. Each level builds upon the last, i
 
 ### I. Basic Audit (Fast & Non-Intrusive)
 
-1.  **Technology Fingerprinter:** Identifies the web stack (CMS, server, framework).
+1.  **Technology Fingerprinter:** Identifies the web stack by inspecting HTTP headers (`Server`, `X-Powered-By`), meta tags (`generator`), JavaScript variables (`React`, `Drupal.settings`), and unique HTML source code patterns to detect CMS (WordPress, Joomla), frameworks (Next.js, Ruby on Rails), UI libraries (React, Vue), and server technologies (Nginx, Apache).
 2.  **Security Headers Checker:** Verifies the presence of headers like CSP, HSTS, etc.
 3.  **Clickjacking Tester:** Checks for missing `X-Frame-Options` or `frame-ancestors`.
 4.  **Cookie Attribute Scanner:** Inspects cookies for `HttpOnly`, `Secure`, and `SameSite` attributes.

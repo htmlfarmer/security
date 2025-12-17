@@ -38,9 +38,21 @@ TECHNOLOGY_SIGNATURES = {
         'robots': []
     },
     'React': {
-        'html': ['data-reactroot', 'data-reactid'],
+        'html': ['data-reactroot', 'data-reactid', '__REACT_DEVTOOLS_GLOBAL_HOOK__'],
         'headers': {},
         'cookies': [],
+        'robots': []
+    },
+    'Vue.js': {
+        'html': ['data-v-', '<!--vue-ssr-outlet-->', '<div id="app">', '__VUE_DEVTOOLS_GLOBAL_HOOK__'],
+        'headers': {},
+        'cookies': [],
+        'robots': []
+    },
+    'Ruby on Rails': {
+        'html': ['<meta name="csrf-param" content="authenticity_token"'],
+        'headers': {'X-Runtime': ''},
+        'cookies': ['_rails_session_id'],
         'robots': []
     },
     # Web Servers

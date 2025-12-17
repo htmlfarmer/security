@@ -30,17 +30,22 @@ def enumerate_subdomains(domain):
 
 def main():
     parser = argparse.ArgumentParser(description="Enumerate subdomains for a given URL.")
-    parser.add_argument("url", help="The target URL (e.g., https://example.com)")
+    parser.add_argument("url", help="The target URL or domain (e.g., https://example.com or example.com)")
     args = parser.parse_args()
 
-    try:
-        domain = urlparse(args.url).netloc
-        # Handle URLs with ports e.g. localhost:8000
-        if ':' in domain:
-            domain = domain.split(':')[0]
-    except Exception as e:
-        print(f"Error: Invalid URL provided. {e}")
+    raw_input = args.url
+    if '://' not in raw_input:
+        raw_input = '//' + raw_input
+
+    domain = urlparse(raw_input).netloc
+    
+    if not domain:
+        print(f"Error: Could not parse a valid domain from '{args.url}'")
         return
+
+    # Handle URLs with ports e.g. localhost:8000
+    if ':' in domain:
+        domain = domain.split(':')[0]
 
     found = enumerate_subdomains(domain)
     if not found:

@@ -23,6 +23,8 @@ Follow these steps to get the toolkit up and running on your local machine.
     pip install -r requirements.txt
     ```
 
+    **Note:** The Selenium-based tests use Selenium Manager to automatically download the correct web driver. Ensure you have Google Chrome or Chromium installed.
+
 ---
 
 ## How to Use
@@ -80,14 +82,18 @@ python3 main.py --tests tech headers http://example.com
 
 Here is a list of the currently available test scripts:
 
-| Test Name      | Audit Level | Description                                          |
-|----------------|-------------|------------------------------------------------------|
-| `tech`         | Basic       | Identifies website technologies (e.g., WordPress).   |
-| `headers`      | Basic       | Checks for important security headers.               |
-| `clickjacking` | Basic       | Tests if the site is vulnerable to clickjacking.     |
-| `links`        | Basic       | Finds broken links on the homepage.                  |
-| `subdomain`    | Advanced    | Tries to find common subdomains.                     |
-| `xss`          | Extreme     | Runs a basic test for Cross-Site Scripting (XSS).    |
+| Test Name        | Audit Level | Description                                               |
+|------------------|-------------|-----------------------------------------------------------|
+| `tech`           | Basic       | Identifies website technologies (e.g., WordPress).        |
+| `headers`        | Basic       | Checks for important security headers.                    |
+| `clickjacking`   | Basic       | Tests if the site is vulnerable to clickjacking.          |
+| `links`          | Basic       | Finds broken links on the homepage.                       |
+| `dns`            | Basic       | Performs a WHOIS, DNS, and NSLOOKUP.                      |
+| `screenshot`     | Basic       | Takes a screenshot of the homepage using a browser.       |
+| `subdomain`      | Advanced    | Tries to find common subdomains.                          |
+| `insecure-forms` | Advanced    | Checks for login forms that submit data over insecure HTTP. |
+| `xss`            | Extreme     | Runs a basic test for Reflected Cross-Site Scripting (XSS). |
+| `dom-xss`        | Extreme     | Runs a basic test for DOM-based XSS vulnerabilities.      |
 
 ---
 

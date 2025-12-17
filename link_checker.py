@@ -36,9 +36,14 @@ def check_links(url):
 
 def main():
     parser = argparse.ArgumentParser(description="Check for broken links on a webpage.")
-    parser.add_argument("url", help="The target URL to check.")
+    parser.add_argument("url", help="The target URL or domain to check (e.g., example.com).")
     args = parser.parse_args()
-    check_links(args.url)
+
+    target_url = args.url
+    if not urlparse(target_url).scheme:
+        target_url = "http://" + target_url
+
+    check_links(target_url)
 
 if __name__ == "__main__":
     main()

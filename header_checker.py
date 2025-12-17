@@ -1,5 +1,6 @@
 import requests
 import argparse
+from urllib.parse import urlparse
 
 SECURITY_HEADERS = [
     "Strict-Transport-Security",
@@ -15,11 +16,11 @@ def check_headers(url):
     Checks for the presence of recommended security headers.
     """
     print(f"[*] Checking security headers for: {url}")
-    missing_headers = []
     
     try:
         response = requests.get(url, timeout=10, verify=False)
         headers = response.headers
+        missing_headers = []
 
         print("\n[+] Found Headers:")
         for header in SECURITY_HEADERS:
@@ -35,15 +36,19 @@ def check_headers(url):
     if missing_headers:
         print("\n[-] Missing Recommended Security Headers:")
         for header in missing_headers:
-            print(f"  - {header}")
+            print(f"  - Missing Header: {header}")
 
 def main():
     parser = argparse.ArgumentParser(description="Check for recommended security headers.")
-    parser.add_argument("url", help="The target URL to analyze (e.g., https://example.com)")
+    parser.add_argument("url", help="The target URL to analyze (e.g., https://example.com or example.com)")
     args = parser.parse_args()
 
+    target_url = args.url
+    if not urlparse(target_url).scheme:
+        target_url = "http://" + target_url
+
     requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
-    check_headers(args.url)
+    check_headers(target_url)
 
 if __name__ == "__main__":
     main()
