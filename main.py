@@ -8,22 +8,35 @@ from typing import List
 # This makes it easy to add new scripts later.
 SCRIPTS = {
     "tech": "tech_fingerprinter.py",
-    "subdomain": "subdomain_enum.py",
     "headers": "header_checker.py",
-    "xss": "xss_scanner.py",
-    "links": "link_checker.py",
     "clickjacking": "clickjacking_checker.py",
+    "cookies": "cookie_checker.py",
+    "robots": "robots_txt.py",
     "dns": "dns_whois_nslookup_checker.py",
+    "spf-dmarc": "spf_dmarc_checker.py",
+    "waf": "waf_detector.py",
+    "links": "link_checker.py",
+    "sensitive-data": "sensitive_data_scanner.py",
+    "sitemap": "sitemap_parser.py",
+    "subdomain": "subdomain_enum.py",
+    "dirbust": "dirbust_scanner.py",
+    "admin": "admin_finder.py",
+    "cors": "cors_checker.py",
+    "http-methods": "http_methods_checker.py",
     "screenshot": "screenshot_taker.py",
     "insecure-forms": "insecure_form_checker.py",
     "dom-xss": "dom_xss_scanner.py",
+    "xss": "xss_scanner.py",
+    "sqli": "sqli_scanner.py",
+    "open-redirect": "open_redirect_checker.py",
+    "traversal": "directory_traversal_checker.py",
 }
 
 # Define which scripts belong to each audit level.
 AUDIT_LEVELS = {
-    "basic": ["tech", "headers", "clickjacking", "links", "dns", "screenshot"],
-    "advanced": ["subdomain", "insecure-forms"],
-    "extreme": ["xss", "dom-xss"]
+    "basic": ["tech", "headers", "clickjacking", "cookies", "robots", "dns", "spf-dmarc", "waf", "links", "sensitive-data", "sitemap", "screenshot"],
+    "advanced": ["subdomain", "dirbust", "admin", "cors", "http-methods", "insecure-forms"],
+    "extreme": ["xss", "dom-xss", "sqli", "open-redirect", "traversal"]
 }
 
 # A list of keywords that indicate a potential vulnerability in a script's output.
@@ -34,6 +47,17 @@ VULNERABILITY_KEYWORDS = [
     "Unreachable Link Found:",
 ]
 
+# ANSI color codes
+RESET = "\033[0m"
+BOLD = "\033[1m"
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+
+def color(text: str, col: str) -> str:
+    return f"{col}{text}{RESET}"
+
 def run_script(script_name, target_url) -> List[str]:
     """
     Runs a specified security script and captures its output to find vulnerabilities.
@@ -43,11 +67,11 @@ def run_script(script_name, target_url) -> List[str]:
     findings = []
 
     if not os.path.exists(script_path):
-        print(f"\n--- [ERROR: Script not found for '{script_name.upper()}'] ---")
-        print(f"File not found: {script_path}")
+        print(color(f"\n--- [ERROR: Script not found for '{script_name.upper()}'] ---", RED))
+        print(color(f"File not found: {script_path}", YELLOW))
         return findings
 
-    print(f"\n--- [RUNNING: {script_name.upper()}] ---")
+    print(color(f"\n--- [RUNNING: {script_name.upper()}] ---", CYAN))
     try:
         # Use sys.executable to ensure the correct Python interpreter is used.
         command = [sys.executable, script_path, target_url]
@@ -60,7 +84,9 @@ def run_script(script_name, target_url) -> List[str]:
             timeout=60 # Add a timeout to prevent indefinite hanging
         )
         
-        print(result.stdout)
+        # Print raw script output (keep uncolored so parsers can read it if needed)
+        if result.stdout:
+            print(result.stdout)
         
         # Parse output for vulnerabilities
         for line in result.stdout.splitlines():
@@ -71,19 +97,19 @@ def run_script(script_name, target_url) -> List[str]:
                     break # Move to the next line once a keyword is found
 
         if result.stderr:
-            print("--- STDERR ---")
+            print(color("--- STDERR ---", YELLOW))
             print(result.stderr)
 
     except FileNotFoundError:
-        print(f"Error: Python interpreter '{sys.executable}' not found.")
+        print(color(f"Error: Python interpreter '{sys.executable}' not found.", RED))
     except subprocess.CalledProcessError as e:
-        print(f"Error executing {script_name}: Script returned a non-zero exit code.")
+        print(color(f"Error executing {script_name}: Script returned a non-zero exit code.", RED))
         print(f"--- STDOUT ---\n{e.stdout}")
         print(f"--- STDERR ---\n{e.stderr}")
     except subprocess.TimeoutExpired:
-        print(f"Error: The script '{script_name}' timed out after 60 seconds.")
+        print(color(f"Error: The script '{script_name}' timed out after 60 seconds.", RED))
     except Exception as e:
-        print(f"An unexpected error occurred while running {script_name}: {e}")
+        print(color(f"An unexpected error occurred while running {script_name}: {e}", RED))
     
     return findings
 
@@ -114,6 +140,10 @@ def main():
     args = parser.parse_args()
 
     target_url = args.url
+    # Ensure URL has a scheme
+    if '://' not in target_url:
+        target_url = "http://" + target_url
+
     tests_to_run = []
     audit_level_msg = "custom"
     all_findings = []
@@ -135,12 +165,12 @@ def main():
             tests_to_run.extend(AUDIT_LEVELS.get('basic', []))
         
         # Remove duplicates while preserving order for logical flow
-        tests_to_run = sorted(list(set(tests_to_run)), key=lambda x: list(SCRIPTS.keys()).index(x))
+        tests_to_run = sorted(list(dict.fromkeys(tests_to_run)), key=lambda x: list(SCRIPTS.keys()).index(x))
 
 
-    print(f"[*] Starting security audit for: {target_url}")
-    print(f"[*] Audit Level: {audit_level_msg}")
-    print(f"[*] Tests to run: {', '.join(tests_to_run)}\n")
+    print(color(f"[*] Starting security audit for: {target_url}", CYAN))
+    print(color(f"[*] Audit Level: {audit_level_msg}", CYAN))
+    print(color(f"[*] Tests to run: {', '.join(tests_to_run)}\n", CYAN))
     
     for test in tests_to_run:
         if test in SCRIPTS:
@@ -148,20 +178,26 @@ def main():
             if findings:
                 all_findings.extend(findings)
         else:
-            print(f"\n--- [WARNING: Test '{test}' is defined in a level but has no corresponding script] ---")
+            print(color(f"\n--- [WARNING: Test '{test}' is defined in a level but has no corresponding script] ---", YELLOW))
 
-    print("\n\n-----------------------------------------")
-    print("--- IMPORTANT SECURITY FINDINGS SUMMARY ---")
-    print("-----------------------------------------")
+    print("\n\n" + color("-----------------------------------------", BOLD))
+    print(color("--- IMPORTANT SECURITY FINDINGS SUMMARY ---", BOLD + CYAN))
+    print(color("-----------------------------------------", BOLD))
     if all_findings:
-        print("The following potential issues were identified:")
+        print(color("The following potential issues were identified:", YELLOW))
         for finding in all_findings:
-            print(f"  * {finding}")
+            # Color findings by severity keyword
+            if "VULNERABILITY" in finding or "VULNERABLE" in finding:
+                print(color(f"  * {finding}", RED))
+            elif "OUTDATED" in finding or "Missing Header" in finding:
+                print(color(f"  * {finding}", YELLOW))
+            else:
+                print(color(f"  * {finding}", GREEN))
     else:
-        print("No significant vulnerabilities were automatically detected based on the checks performed.")
+        print(color("No significant vulnerabilities were automatically detected based on the checks performed.", GREEN))
 
 
-    print("\n--- [AUDIT COMPLETE] ---")
+    print("\n" + color("--- [AUDIT COMPLETE] ---", BOLD + GREEN))
 
 
 if __name__ == "__main__":

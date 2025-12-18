@@ -1,6 +1,13 @@
+import warnings
+warnings.filterwarnings('ignore')
+warnings.simplefilter('ignore')
+
 import requests
 import argparse
 from urllib.parse import urlparse
+from suggestions import print_suggestions
+
+requests.packages.urllib3.disable_warnings()
 
 SECURITY_HEADERS = [
     "Strict-Transport-Security",
@@ -36,7 +43,9 @@ def check_headers(url):
     if missing_headers:
         print("\n[-] Missing Recommended Security Headers:")
         for header in missing_headers:
-            print(f"  - Missing Header: {header}")
+            finding = f"Missing Header: {header}"
+            print(f"  - {finding}")
+            print_suggestions(finding)
 
 def main():
     parser = argparse.ArgumentParser(description="Check for recommended security headers.")
@@ -47,7 +56,6 @@ def main():
     if not urlparse(target_url).scheme:
         target_url = "http://" + target_url
 
-    requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
     check_headers(target_url)
 
 if __name__ == "__main__":

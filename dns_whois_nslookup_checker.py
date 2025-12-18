@@ -1,3 +1,7 @@
+import warnings
+warnings.filterwarnings('ignore')
+warnings.simplefilter('ignore')
+
 import whois
 import dns.resolver
 import argparse

@@ -1,7 +1,13 @@
+import warnings
+warnings.filterwarnings('ignore')
+warnings.simplefilter('ignore')
+
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import argparse
+
+requests.packages.urllib3.disable_warnings()
 
 def check_links(url):
     """

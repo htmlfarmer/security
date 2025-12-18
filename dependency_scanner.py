@@ -1,8 +1,26 @@
+import warnings
+warnings.filterwarnings('ignore')
+warnings.simplefilter('ignore')
+
 import argparse
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import re
+
+requests.packages.urllib3.disable_warnings()
+
+# ANSI color codes (simple, no extra deps)
+RESET = "\033[0m"
+BOLD = "\033[1m"
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+MAGENTA = "\033[35m"
+
+def color(text: str, col: str) -> str:
+    return f"{col}{text}{RESET}"
 
 # Small list of libraries and minimum safe version heuristics (very conservative)
 LIB_SIGNATURES = {
@@ -43,7 +61,7 @@ def find_assets(url):
         r = requests.get(url, timeout=10)
         r.raise_for_status()
     except Exception as e:
-        print(f"Error fetching {url}: {e}")
+        print(color(f"Error fetching {url}: {e}", RED))
         return []
 
     soup = BeautifulSoup(r.text, 'lxml')
@@ -77,21 +95,27 @@ def main():
     args = parser.parse_args()
 
     target = args.url if '://' in args.url else 'http://' + args.url
-    print(f"[*] Scanning assets on {target} ...")
+    print(color(f"[*] Scanning assets on {target} ...", CYAN))
     assets = find_assets(target)
     if not assets:
-        print("[-] No assets found or page could not be fetched.")
+        print(color("[-] No assets found or page could not be fetched.", YELLOW))
         return
 
     findings = scan_assets_for_libs(assets)
     if findings:
-        print("[+] Detected frontend libraries:")
+        print(color("[+] Detected frontend libraries:", GREEN))
         for f in findings:
             status = "OUTDATED" if f['older'] else "OK"
-            note = "  -- Potentially vulnerable (old version)" if f['older'] else ""
-            print(f"  - {f['library']} {f['version']} (source: {f['asset']}) [{status}]{note}")
+            if f['older']:
+                status_colored = color(status, RED + BOLD)
+                note = color("  -- Potentially vulnerable (old version)", YELLOW)
+                finding = f"OUTDATED: {f['library']} {f['version']}"
+                print(f"  - {color(f['library'], MAGENTA)} {color(f['version'], CYAN)} (source: {f['asset']}) [{status_colored}]{note}")
+            else:
+                status_colored = color(status, GREEN)
+                print(f"  - {color(f['library'], MAGENTA)} {color(f['version'], CYAN)} (source: {f['asset']}) [{status_colored}]")
     else:
-        print("[-] No known libraries/versions detected from asset URLs.")
+        print(color("[-] No known libraries/versions detected from asset URLs.", YELLOW))
 
 if __name__ == "__main__":
     main()

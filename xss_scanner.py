@@ -1,7 +1,14 @@
+import warnings
+warnings.filterwarnings('ignore')
+warnings.simplefilter('ignore')
+
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import argparse
+from suggestions import print_suggestions
+
+requests.packages.urllib3.disable_warnings()
 
 def scan_xss(url):
     """
@@ -41,7 +48,9 @@ def scan_xss(url):
                     res = requests.get(post_url, params=data, timeout=10)
                 
                 if xss_payload in res.text:
-                    print(f"[+] VULNERABILITY: Reflected XSS found in form at {post_url}")
+                    finding = f"VULNERABILITY: Reflected XSS found in form at {post_url}"
+                    print(f"[+] {finding}")
+                    print_suggestions(finding)
                     vulnerable = True
             except requests.RequestException as e:
                 print(f"[-] Failed to submit form to {post_url}: {e}")

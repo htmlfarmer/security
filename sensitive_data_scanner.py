@@ -1,8 +1,15 @@
+import warnings
+warnings.filterwarnings('ignore')
+warnings.simplefilter('ignore')
+
 import argparse
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import re
+from suggestions import print_suggestions
+
+requests.packages.urllib3.disable_warnings()
 
 PATTERNS = {
     'AWS Access Key': re.compile(r'AKIA[0-9A-Z]{16}'),
@@ -63,10 +70,12 @@ def main():
             findings += scan_text_for_patterns(js_text)
 
     if findings:
-        print("[+] Potential sensitive data found:")
+        finding = "Potential sensitive data found"
+        print(f"[+] {finding}:")
         for f in findings:
             print(f"  - {f['type']}: {f['match']}")
             print(f"      Snippet: {f['snippet']}")
+        print_suggestions(finding)
     else:
         print("[-] No obvious sensitive patterns were found (this is not exhaustive).")
 

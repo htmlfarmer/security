@@ -1,0 +1,15 @@
+# This is an example configuration file.
+# Copy this to 'config.yaml' and edit it for your scans.
+
+# Default target URL to scan if none is provided on the command line.
+target_url: "http://example.com"
+
+# You can exclude specific tests from running, even in 'all' or level-based scans.
+# This is useful for noisy or irrelevant tests for a specific target.
+exclude_tests:
+  - links # Example: Exclude the broken link checker.
+  # - subdomain
+
+# Future settings like authentication tokens or custom headers could go here.
+# headers:
+#   Authorization: "Bearer your_token_here"

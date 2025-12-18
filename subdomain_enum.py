@@ -1,6 +1,12 @@
+import warnings
+warnings.filterwarnings('ignore')
+warnings.simplefilter('ignore')
+
 import requests
 import argparse
 from urllib.parse import urlparse
+
+requests.packages.urllib3.disable_warnings()
 
 def enumerate_subdomains(domain):
     """
@@ -25,7 +31,7 @@ def enumerate_subdomains(domain):
             pass
         except Exception as e:
             print(f"[-] An error occurred trying {sub_url}: {e}")
-            
+
     return found_subdomains
 
 def main():

@@ -1,6 +1,13 @@
+import warnings
+warnings.filterwarnings('ignore')
+warnings.simplefilter('ignore')
+
 import requests
 import argparse
 from urllib.parse import urlparse
+from suggestions import print_suggestions
+
+requests.packages.urllib3.disable_warnings()
 
 def check_clickjacking(url):
     """
@@ -22,8 +29,10 @@ def check_clickjacking(url):
             print(f"[+] Site is protected with Content-Security-Policy: frame-ancestors directive found.")
             return
 
-        print("[-] VULNERABILITY: Site may be vulnerable to Clickjacking.")
+        finding = "VULNERABILITY: Site may be vulnerable to Clickjacking"
+        print(f"[-] {finding}")
         print("    Reason: Missing 'X-Frame-Options' or 'Content-Security-Policy' with 'frame-ancestors'.")
+        print_suggestions(finding)
         
     except requests.RequestException as e:
         print(f"Error: Could not connect to {url}. Details: {e}")
@@ -37,7 +46,6 @@ def main():
     if not urlparse(target_url).scheme:
         target_url = "http://" + target_url
 
-    requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
     check_clickjacking(target_url)
 
 if __name__ == "__main__":
