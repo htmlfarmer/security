@@ -109,3 +109,6 @@ def main():
     if driver:
         take_screenshot(target_url, driver)
         driver.quit()
+
+if __name__ == "__main__":
+    main()

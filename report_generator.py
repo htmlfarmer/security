@@ -152,22 +152,22 @@ def build_html_report(title: str, sections: List[dict], summary: dict, screensho
     html_parts.append("</body></html>")
     return ''.join(html_parts)
 
-def main():
-    parser = argparse.ArgumentParser(description="Run selected scanners and generate a single HTML report.")
-    parser.add_argument("target", help="Target URL or domain (e.g., example.com)")
-    parser.add_argument("-o", "--out", help="Output HTML filename (default: outputs/report_<target>.html)")
-    args = parser.parse_args()
-
-    target = args.target if '://' in args.target else 'http://' + args.target
-    sections = []
-    aggregated_findings = []
-
-    for script in SCRIPTS_TO_RUN:
-        print(f"[*] Running {script} ...")
-        output, findings = run_script_and_capture(script, target)
-        sections.append({'name': script, 'output': output})
-        aggregated_findings.extend(findings)
-
+def run_screenshot_for_target(target: str) -> None:
+    """
+    Invoke screenshot_taker.py to ensure a screenshot exists for the target.
+    Prints its stdout/stderr to the console for visibility.
+    """
+    script = os.path.join(PROJECT_DIR, "screenshot_taker.py")
+    if not os.path.exists(script):
+        print(f"[-] Screenshot script not found: {script}")
+        return
+    try:
+        print(f"[*] Taking screenshot for {target} ...")
+        proc = subprocess.run([sys.executable, script, target], capture_output=True, text=True, timeout=180)
+        if proc.stdout:
+            print(proc.stdout)
+        if proc.stderr:
+            print("--- STDERR from screenshot_taker.py ---")
     # Build summary
     counts = {'High':0,'Medium':0,'Low':0}
     for f in aggregated_findings:
