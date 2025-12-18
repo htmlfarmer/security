@@ -168,6 +168,30 @@ def run_screenshot_for_target(target: str) -> None:
             print(proc.stdout)
         if proc.stderr:
             print("--- STDERR from screenshot_taker.py ---")
+            print(proc.stderr)
+    except Exception as e:
+        print(f"[-] Error running screenshot_taker.py: {e}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Run selected scanners and generate a single HTML report.")
+    parser.add_argument("target", help="Target URL or domain (e.g., example.com)")
+    parser.add_argument("-o", "--out", help="Output HTML filename (default: outputs/report_<target>.html)")
+    args = parser.parse_args()
+
+    target = args.target if '://' in args.target else 'http://' + args.target
+    sections = []
+    aggregated_findings = []
+
+    # Ensure outputs dir exists and take a screenshot first
+    os.makedirs(OUTPUTS_DIR, exist_ok=True)
+    run_screenshot_for_target(target)
+
+    for script in SCRIPTS_TO_RUN:
+        print(f"[*] Running {script} ...")
+        output, findings = run_script_and_capture(script, target)
+        sections.append({'name': script, 'output': output})
+        aggregated_findings.extend(findings)
+
     # Build summary
     counts = {'High':0,'Medium':0,'Low':0}
     for f in aggregated_findings:
@@ -181,8 +205,6 @@ def run_screenshot_for_target(target: str) -> None:
         'findings': sorted_findings
     }
 
-    # Ensure outputs dir exists and find screenshot there
-    os.makedirs(OUTPUTS_DIR, exist_ok=True)
     inline_b64, screenshot_file = find_screenshot_for_target(target)
 
     # Default report location inside outputs/
