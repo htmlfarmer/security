@@ -7,7 +7,6 @@ import html
 import glob
 import json
 from typing import List, Tuple, Dict
-from scanner_utils import classify_line
 from test_descriptions import get_description
 
 SCRIPTS_TO_RUN = [
@@ -32,10 +31,35 @@ SCRIPTS_TO_RUN = [
 PROJECT_DIR = os.path.dirname(__file__)
 OUTPUTS_DIR = os.path.join(PROJECT_DIR, "outputs")
 
-def run_script_and_capture(script: str, target: str) -> Tuple[str, List[dict]]:
+# Simple keyword -> severity mapping for automatic classification
+KEYWORD_SEVERITY = {
+    'VULNERABILITY': 'High',
+    'Potential sensitive data': 'High',
+    'OUTDATED': 'Medium',
+    'Missing Header': 'Medium',
+    'Broken Link Found': 'Low',
+    'Unreachable Link Found': 'Low',
+    'Could not fetch': 'Low',
+    'Error': 'Low'
+}
+
+def classify_line(line: str) -> Tuple[str, str]:
+    """
+    Return (matched_keyword, severity) for a line if any keyword is found.
+    """
+    for kw, sev in KEYWORD_SEVERITY.items():
+        if kw in line:
+            return kw, sev
+    return '', ''
+
+def run_script_and_capture(script: str, target: str) -> Tuple[str, List[dict], List[str]]:
+    """
+    Run a script and return raw output, parsed findings, and suggestions.
+    Returns (output, findings_list, suggestions_list)
+    """
     path = os.path.join(PROJECT_DIR, script)
     if not os.path.exists(path):
-        return f"Script missing: {script}\n", []
+        return f"Script missing: {script}\n", [], []
     try:
         proc = subprocess.run([sys.executable, path, target],
                               capture_output=True, text=True, timeout=120)
@@ -45,16 +69,36 @@ def run_script_and_capture(script: str, target: str) -> Tuple[str, List[dict]]:
             out += "\n--- STDERR ---\n" + err
 
         findings = []
+        suggestions = []
+        current_in_suggestions = False
+        
         for raw_line in out.splitlines():
             line = raw_line.strip()
             if not line:
                 continue
-            sev, kw = classify_line(line)
-            if sev:
+            
+            # Check if we're entering suggestions section
+            if "SUGGESTIONS:" in line or "📋" in line:
+                current_in_suggestions = True
+                continue
+            
+            # Capture suggestions
+            if current_in_suggestions and (line.startswith('1.') or line.startswith('2.') or 
+                                          line.startswith('3.') or line.startswith('4.') or
+                                          line.startswith('5.') or line.startswith('-')):
+                suggestions.append(line)
+            elif current_in_suggestions and line.startswith('['):
+                # End of suggestions section
+                current_in_suggestions = False
+            
+            # Capture findings
+            kw, sev = classify_line(line)
+            if kw:
                 findings.append({'line': line, 'keyword': kw, 'severity': sev, 'script': script})
-        return out, findings
+        
+        return out, findings, suggestions
     except Exception as e:
-        return f"Error running {script}: {e}\n", [{'line': str(e), 'keyword': 'Error', 'severity': 'Low', 'script': script}]
+        return f"Error running {script}: {e}\n", [{'line': str(e), 'keyword': 'Error', 'severity': 'Low', 'script': script}], []
 
 def find_screenshot_for_target(target: str) -> Tuple[str, str]:
     """
@@ -104,6 +148,10 @@ def build_html_report(title: str, sections: List[dict], summary: dict, screensho
         "pre { background: #f6f6f6; padding: 12px; border: 1px solid #ddd; overflow-x: auto; max-height: 400px; border-radius: 4px; font-size: 0.85em; }",
         "h2 { border-bottom: 2px solid #2196F3; padding-bottom: 10px; margin-top: 40px; margin-bottom: 16px; color: #333; }",
         ".description { background: #e3f2fd; border-left: 4px solid #2196F3; padding: 14px; margin: 16px 0; font-size: 0.95em; line-height: 1.6; border-radius: 4px; }",
+        ".suggestions-box { background: #fff3cd; border-left: 4px solid #ffc107; padding: 14px; margin: 16px 0; font-size: 0.95em; border-radius: 4px; }",
+        ".suggestions-box h4 { margin-top: 0; color: #856404; }",
+        ".suggestions-box ol { margin: 10px 0; padding-left: 20px; }",
+        ".suggestions-box li { margin: 6px 0; color: #333; }",
         ".top-issue { margin: 8px 0; padding: 10px; border-left: 3px solid #f00; background: #fff7f7; border-radius: 2px; }",
         ".top-issue strong { display: inline-block; min-width: 70px; }",
         ".top-issue em { color: #666; font-size: 0.9em; }",
@@ -160,15 +208,30 @@ def build_html_report(title: str, sections: List[dict], summary: dict, screensho
 
     html_parts.append("</div>")  # end summary
 
-    # Full sections with descriptions (vertically stacked)
+    # Full sections with descriptions and suggestions
     for sec in sections:
         script_name = sec['name']
         description = get_description(script_name)
+        suggestions = sec.get('suggestions', [])
         
         html_parts.append(f"<h2>{html.escape(script_name)}</h2>")
         html_parts.append(f"<div class='description'>{html.escape(description)}</div>")
+        
+        # Add suggestions box if any suggestions found
+        if suggestions:
+            html_parts.append("<div class='suggestions-box'>")
+            html_parts.append("<h4>💡 Suggestions & Remediation</h4>")
+            html_parts.append("<ol>")
+            for suggestion in suggestions:
+                # Clean up suggestion text (remove numbering if present)
+                clean_suggestion = suggestion.lstrip('0123456789.- ')
+                html_parts.append(f"<li>{html.escape(clean_suggestion)}</li>")
+            html_parts.append("</ol>")
+            html_parts.append("</div>")
+        
+        html_parts.append("<h4>Test Output:</h4>")
         html_parts.append("<pre>")
-        html_parts.append(html.escape(sec['output'][:2000]))  # Limit output to first 2000 chars
+        html_parts.append(html.escape(sec['output'][:2000]))
         html_parts.append("</pre>")
 
     # Modal for full-size screenshot
@@ -194,14 +257,12 @@ function closeModal() {
     modal.classList.remove('active');
 }
 
-// Close modal when clicking outside the image
 document.getElementById('screenshotModal').addEventListener('click', function(e) {
     if (e.target === this) {
         closeModal();
     }
 });
 
-// Close modal with Escape key
 document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
         closeModal();
@@ -249,8 +310,8 @@ def main():
 
     for script in SCRIPTS_TO_RUN:
         print(f"[*] Running {script} ...")
-        output, findings = run_script_and_capture(script, target)
-        sections.append({'name': script, 'output': output})
+        output, findings, suggestions = run_script_and_capture(script, target)
+        sections.append({'name': script, 'output': output, 'suggestions': suggestions})
         aggregated_findings.extend(findings)
 
     # Build summary
@@ -268,7 +329,6 @@ def main():
 
     inline_b64, screenshot_file = find_screenshot_for_target(target)
 
-    # Default report location inside outputs/
     safe_name = args.out or os.path.join(OUTPUTS_DIR, f"report_{target.replace('://','_').replace('/','_')}.html")
     report_html = build_html_report(f"Security Scan Report for {target}", sections, summary, screenshot_inline_b64=inline_b64 if inline_b64 else None, screenshot_file=screenshot_file if screenshot_file else None, report_path=safe_name)
 
