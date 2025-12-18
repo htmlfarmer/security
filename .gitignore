@@ -1,0 +1,5 @@
+# Ignore generated scan artifacts
+/outputs/
+/*.png
+screenshot_*.json
+report_*.html

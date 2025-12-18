@@ -10,7 +10,7 @@ This list is divided into three audit levels. Each level builds upon the last, i
 
 ### I. Basic Audit (Fast & Non-Intrusive)
 
-1.  **Technology Fingerprinter:** Identifies the web stack by inspecting HTTP headers (`Server`, `X-Powered-By`), meta tags (`generator`), JavaScript variables (`React`, `Drupal.settings`), and unique HTML source code patterns to detect CMS (WordPress, Joomla), frameworks (Next.js, Ruby on Rails), UI libraries (React, Vue), and server technologies (Nginx, Apache).
+1.  **Technology Fingerprinter:** Identifies the web stack by inspecting HTTP headers (`Server`, `X-Powered-By`), cookies, meta tags (`generator`), JavaScript variables (`React`, `Drupal.settings`), error messages, and unique HTML/CSS patterns to detect CMS (WordPress, Joomla), frameworks (Next.js, Ruby on Rails), UI libraries (React, Vue), and server technologies (Nginx, Apache).
 2.  **Security Headers Checker:** Verifies the presence of headers like CSP, HSTS, etc.
 3.  **Clickjacking Tester:** Checks for missing `X-Frame-Options` or `frame-ancestors`.
 4.  **Cookie Attribute Scanner:** Inspects cookies for `HttpOnly`, `Secure`, and `SameSite` attributes.
@@ -19,6 +19,7 @@ This list is divided into three audit levels. Each level builds upon the last, i
 7.  **Email Spoofing (SPF/DMARC) Checker:** Checks DNS for correct anti-spoofing configurations.
 8.  **WAF Detector:** Identifies if a Web Application Firewall is in place.
 9.  **Broken Link Checker:** Crawls the initial page to find broken links.
+10. **Sensitive Data Exposure Scanner:** Scans publicly accessible JS files and HTML source for patterns that look like API keys, hardcoded secrets, and email addresses.
 
 ---
 
@@ -34,7 +35,7 @@ This list is divided into three audit levels. Each level builds upon the last, i
 17. **CORS Misconfiguration Checker:** Tests for overly permissive CORS headers.
 18. **Username Enumeration Detector:** Checks login/reset pages for information disclosure.
 19. **CSRF Token Checker:** Crawls and verifies that sensitive forms contain anti-CSRF tokens.
-20. **Dependency Vulnerability Scanner:** Checks for outdated and vulnerable frontend JS libraries.
+20. **Dependency Vulnerability Scanner:** Checks for outdated frontend JS libraries. Also checks for publicly exposed dependency management files (e.g., `package-lock.json`, `composer.lock`) and correlates versions with known vulnerabilities.
 21. **API Endpoint Discovery:** Scans JS files to discover unlinked API endpoints.
 
 ---
@@ -53,5 +54,14 @@ This list is divided into three audit levels. Each level builds upon the last, i
 31. **DOM-based XSS Scanner:** Uses a headless browser to inject payloads into URL fragments.
 32. **Insecure Form Action Checker:** Crawls the site to find forms submitting over HTTP.
 33. **User Workflow IDOR Tester:** (Requires configuration) Logs in as different users to test access controls.
-34. **API Authorization Tester:** Tries to access authenticated API endpoints with invalid tokens.
+34. **API Authorization Tester:** Tries to access authenticated API endpoints with invalid tokens. Also checks for common JSON Web Token (JWT) misconfigurations like weak secrets or `alg:none`.
 35. **API Rate Limiting Tester:** Sends a high volume of requests to an API endpoint.
+
+---
+
+### IV. Tool Enhancements (UI & Functionality)
+
+36. **HTML/PDF Report Generator:** Instead of just console output, compile all findings into a professional, easy-to-read HTML or PDF report. Include vulnerability descriptions, risk ratings, and remediation advice.
+37. **Colorized Console Output:** Use colors in the terminal to make results more readable (e.g., red for high-risk findings, yellow for warnings, green for passed checks).
+38. **Verbosity Control:** Implement `-v` (verbose) and `-q` (quiet) flags to control how much detail is printed to the console during a scan.
+39. **Configuration File Support:** Allow users to define targets, exclude specific paths or tests, and provide authentication tokens via a `config.yaml` file for more complex, authenticated scans.
