@@ -7,7 +7,7 @@ import argparse
 from urllib.parse import urlparse
 from suggestions import print_suggestions
 
-requests.packages.urllib3.disable_warnings()
+requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 def check_cookies(url):
     """Inspect cookies for security attributes."""
@@ -25,12 +25,25 @@ def check_cookies(url):
             print(f"\n  - {cookie.name}:")
             print(f"    Value: {cookie.value[:50]}..." if len(cookie.value) > 50 else f"    Value: {cookie.value}")
             
+            # Robust attribute detection using cookie._rest / cookie.rest
+            rest = {}
+            if hasattr(cookie, 'rest') and isinstance(cookie.rest, dict):
+                rest = cookie.rest
+            elif hasattr(cookie, '_rest') and isinstance(cookie._rest, dict):
+                rest = cookie._rest
+            rest_l = {k.lower(): v for k, v in rest.items()}
+            
             issues = []
-            if not cookie.secure:
+            # Secure flag
+            if not getattr(cookie, 'secure', False):
                 issues.append("Missing 'Secure' flag (cookie sent over HTTP)")
-            if not cookie.has_nonscript_attr and cookie.name not in ['__Host-', '__Secure-']:
+            # HttpOnly: check presence in rest keys (case-insensitive)
+            has_httponly = any(k for k in rest_l.keys() if k == 'httponly')
+            if not has_httponly and not (cookie.name.startswith('__Host-') or cookie.name.startswith('__Secure-')):
                 issues.append("Missing 'HttpOnly' flag (accessible via JavaScript)")
-            if not cookie.samesite:
+            # SameSite
+            samesite = rest_l.get('samesite') or rest_l.get('same_site') or None
+            if not samesite:
                 issues.append("Missing 'SameSite' attribute (vulnerable to CSRF)")
             
             if issues:

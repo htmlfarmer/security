@@ -6,6 +6,7 @@ import datetime
 import html
 import glob
 import json
+import re
 from typing import List, Tuple, Dict
 from test_descriptions import get_description
 
@@ -65,8 +66,10 @@ def run_script_and_capture(script: str, target: str) -> Tuple[str, List[dict], L
                               capture_output=True, text=True, timeout=120)
         out = proc.stdout or ""
         err = proc.stderr or ""
-        if err:
-            out += "\n--- STDERR ---\n" + err
+        combined = out + ("\n--- STDERR ---\n" + err if err else "")
+        # Remove ANSI escape sequences for clean HTML and parsing
+        clean = re.sub(r'\x1b\[[0-9;]*m', '', combined)
+        out = clean
 
         findings = []
         suggestions = []
@@ -85,8 +88,9 @@ def run_script_and_capture(script: str, target: str) -> Tuple[str, List[dict], L
             # Capture suggestions
             if current_in_suggestions and (line.startswith('1.') or line.startswith('2.') or 
                                           line.startswith('3.') or line.startswith('4.') or
-                                          line.startswith('5.') or line.startswith('-')):
+                                          line.startswith('5.') or line.startswith('-') or line[0].isdigit()):
                 suggestions.append(line)
+                continue
             elif current_in_suggestions and line.startswith('['):
                 # End of suggestions section
                 current_in_suggestions = False
