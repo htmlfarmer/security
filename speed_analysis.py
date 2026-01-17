@@ -35,8 +35,11 @@ def run(url, chrome_path=None, wait=5):
     driver = webdriver.Chrome(options=opts)
     try:
         driver.set_page_load_timeout(wait + 30)
+        t0 = time.time()
         driver.get(url)
+        t1 = time.time()
         time.sleep(wait)
+        total_load_time = (t1 - t0) * 1000.0
 
         js = r"""
         (function(){
@@ -199,64 +202,92 @@ def selenium_fallback(url: str, headless: bool = True, wait: int = 8, chrome_pat
 
     driver = webdriver.Chrome(options=opts)
     try:
-        driver.set_page_load_timeout(wait + 30)
-        driver.get(url)
-        time.sleep(wait)
-
-        js = r"""
+        # Install a script to run on every new document to capture performance entries
+        js_observer = r"""
         (function(){
-          try{ if(window.__speedResults) return window.__speedResults; }catch(e){}
-          var results = {fcp:null, lcp:null, longTasks:[]};
-          try{
-            var paints = (performance.getEntriesByType && performance.getEntriesByType('paint')) || [];
-            for(var i=0;i<paints.length;i++){ if(paints[i].name==='first-contentful-paint') results.fcp = paints[i].startTime; }
-          }catch(e){}
-          try{
-            var lcps = (performance.getEntriesByType && performance.getEntriesByType('largest-contentful-paint')) || [];
-            if(lcps.length) results.lcp = lcps[lcps.length-1].startTime || lcps[lcps.length-1].renderTime || null;
-          }catch(e){}
-          try{
-            if(window.PerformanceObserver){
-              var obs = new PerformanceObserver(function(list){
-                list.getEntries().forEach(function(e){
+          try{ if(window.__speedResults) return; }catch(e){}
+          (function(){
+            try{ if(window.__speedResults) return; }catch(e){}
+            var results = {fcp:null, lcp:null, longTasks:[]};
+            try{
+              if(window.PerformanceObserver){
+                var obs = new PerformanceObserver(function(list){
+                  list.getEntries().forEach(function(e){
+                    try{
+                      if(e.entryType==='longtask') results.longTasks.push(e.duration);
+                      if(e.entryType==='largest-contentful-paint') results.lcp = e.startTime || e.renderTime || results.lcp;
+                      if(e.entryType==='paint' && e.name==='first-contentful-paint') results.fcp = e.startTime;
+                    }catch(_){ }
+                  });
+                });
+                try{ obs.observe({type:'longtask', buffered:true}); }catch(_){ }
+                try{ obs.observe({type:'largest-contentful-paint', buffered:true}); }catch(_){ }
+                try{ obs.observe({type:'paint', buffered:true}); }catch(_){ }
+              } else {
+                var paints = performance.getEntriesByType && performance.getEntriesByType('paint') || [];
+                for(var i=0;i<paints.length;i++){ if(paints[i].name==='first-contentful-paint') results.fcp = paints[i].startTime; }
+                var lcps = performance.getEntriesByType && performance.getEntriesByType('largest-contentful-paint') || [];
+                if(lcps.length) results.lcp = lcps[lcps.length-1].startTime || lcps[lcps.length-1].renderTime || results.lcp;
+                var lts = performance.getEntriesByType && performance.getEntriesByType('longtask') || [];
+                for(var j=0;j<lts.length;j++) results.longTasks.push(lts[j].duration);
+              }
+            }catch(_){ }
+            try{ window.__speedResults = results; }catch(_){ }
+          })();
+        })();
+        """
+
         try:
-            driver.quit()
+            driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': js_observer})
         except Exception:
+            # older selenium / drivers may not support CDP; continue without injection
             pass
-                                });
-                            });
-                            try{ obs.observe({type:'longtask', buffered:true}); }catch(_){}
-                            try{ obs.observe({type:'largest-contentful-paint', buffered:true}); }catch(_){}
-                            try{ obs.observe({type:'paint', buffered:true}); }catch(_){}
-                        } else {
-                            var lts = performance.getEntriesByType && performance.getEntriesByType('longtask') || [];
-                            for(var j=0;j<lts.length;j++) results.longTasks.push(lts[j].duration);
-                        }
-                    }catch(e){}
-                    try{ window.__speedResults = results; }catch(e){}
-                    return results;
-                })();
-                """
 
-                results = driver.execute_script(js)
-                if not results:
-                        results = {}
+        driver.set_page_load_timeout(wait + 30)
+        t0 = time.time()
+        driver.get(url)
+        t1 = time.time()
+        time.sleep(wait)
+        total_load_time = (t1 - t0) * 1000.0
 
-                long_tasks = results.get("longTasks") or []
+        # Try to read results populated by the injected observer first
+        try:
+            results = driver.execute_script('return window.__speedResults') or {}
+        except Exception:
+            results = {}
+
+        # Fallback: try to collect entries post-load if observer didn't populate
+        if not results:
+            js = r"""
+            (function(){
+              var r={fcp:null,lcp:null,longTasks:[]};
+              try{ (performance.getEntriesByType||(()=>[]))('paint').forEach(function(e){ if(e.name==='first-contentful-paint') r.fcp=e.startTime; }); }catch(e){}
+              try{ (performance.getEntriesByType||(()=>[]))('largest-contentful-paint').forEach(function(e){ r.lcp=e.startTime||e.renderTime||r.lcp; }); }catch(e){}
+              try{ (performance.getEntriesByType||(()=>[]))('longtask').forEach(function(e){ r.longTasks.push(e.duration); }); }catch(e){}
+              return r;
+            })();
+            """
+            try:
+                results = driver.execute_script(js) or {}
+            except Exception:
+                results = {}
+
+        long_tasks = results.get('longTasks') or []
+        tbt = None
+        if long_tasks:
+            try:
+                tbt = sum(max(0, float(d)-50.0) for d in long_tasks)
+            except Exception:
                 tbt = None
-                if long_tasks:
-                        try:
-                                tbt = sum(max(0, float(d) - 50.0) for d in long_tasks)
-                        except Exception:
-                                tbt = None
 
-                metrics = {
-                        "first-contentful-paint": results.get("fcp") if isinstance(results.get("fcp"), (int, float)) else None,
-                        "largest-contentful-paint": results.get("lcp") if isinstance(results.get("lcp"), (int, float)) else None,
-                        "total-blocking-time": tbt,
-                        "speed-index": None,
-                        "performance_score": None,
-                }
+        metrics = {
+            "first-contentful-paint": results.get('fcp') if isinstance(results.get('fcp'), (int, float)) else None,
+            "largest-contentful-paint": results.get('lcp') if isinstance(results.get('lcp'), (int, float)) else None,
+            "total-blocking-time": tbt,
+            "total_load_time": total_load_time,
+            "speed-index": None,
+            "performance_score": None,
+        }
         return metrics
     finally:
         try:
@@ -269,6 +300,7 @@ def print_report(metrics: dict):
     fcp = metrics.get("first-contentful-paint")
     lcp = metrics.get("largest-contentful-paint")
     tbt = metrics.get("total-blocking-time")
+    total_load_time = metrics.get("total_load_time")
     si = metrics.get("speed-index")
     score = metrics.get("performance_score")
 
@@ -277,6 +309,7 @@ def print_report(metrics: dict):
     print(f"First Contentful Paint: {human(fcp)}")
     print(f"Largest Contentful Paint: {human(lcp)}")
     print(f"Total Blocking Time (approx): {human(tbt)}")
+    print(f"Total load time: {human(total_load_time)}")
     print(f"Speed Index: {human(si)}")
     if score is not None:
         print(f"Performance score: {score*100:.0f}/100 — {evaluate_score(score)}")

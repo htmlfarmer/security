@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Security Audit UI</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header>
+    <h1>Security Audit Runner</h1>
+  </header>
+
+  <main>
+    <label>Target URL: <input id="url" placeholder="example.com"></label>
+
+    <section>
+      <h3>Select Tests</h3>
+      <div id="tests"></div>
+      <div class="controls">
+        <label>Level:
+          <select id="level">
+            <option value="basic">basic</option>
+            <option value="advanced">advanced</option>
+            <option value="extreme">extreme</option>
+          </select>
+        </label>
+        <button id="run-selected">Run Selected</button>
+        <button id="run-level">Run Level</button>
+        <button id="run-all">Run All</button>
+      </div>
+    </section>
+
+    <section>
+      <h3>Results</h3>
+      <div id="summary"></div>
+      <div id="results"></div>
+    </section>
+  </main>
+
+  <footer>
+    <small>Runs scripts on the server; outputs shown below.</small>
+  </footer>
+
+  <script src="/static/security.js"></script>
+</body>
+</html>
