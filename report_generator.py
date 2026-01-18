@@ -9,7 +9,83 @@ import json
 import re
 from typing import List, Tuple, Dict
 from test_descriptions import get_description
+import requests
+from requests.exceptions import RequestException
 
+# LLM server configuration: override via env var LLM_SERVER_URL
+# Default changed to your requested host (uses the /ask endpoint)
+LLM_SERVER_URL = os.environ.get('LLM_SERVER_URL', 'http://ashy.tplinkdns.com:5005/ask')
+
+def query_llm(prompt: str, system_prompt: str = None, timeout: int = None) -> str:
+    """Query the local LLM server (/ask) and return the assistant response text.
+    Returns empty string on error or timeout.
+    """
+    payload = {'prompt': prompt}
+    if system_prompt:
+        payload['system_prompt'] = system_prompt
+
+    # Write prompt to debug log (best-effort)
+    try:
+        os.makedirs(OUTPUTS_DIR, exist_ok=True)
+        with open(os.path.join(OUTPUTS_DIR, 'llm_debug.log'), 'a', encoding='utf-8') as lf:
+            lf.write(f"\n--- PROMPT ({datetime.datetime.utcnow().isoformat()}) ---\n")
+            lf.write(prompt[:10000] + "\n")
+    except Exception:
+        pass
+
+    try:
+        llm_timeout = timeout or int(os.environ.get('LLM_TIMEOUT', '30'))
+        max_attempts = int(os.environ.get('LLM_RETRIES', '2'))
+        resp = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = requests.post(LLM_SERVER_URL, json=payload, timeout=llm_timeout)
+                if resp.status_code == 200:
+                    break
+            except RequestException as ex:
+                if attempt < max_attempts:
+                    time_to_wait = 0.3 * attempt
+                    try:
+                        import time
+                        time.sleep(time_to_wait)
+                    except Exception:
+                        pass
+                else:
+                    raise
+        if not resp or resp.status_code != 200:
+            return ''
+        data = resp.json()
+        resp_text = (data.get('response') or '').strip()
+
+        # append raw response to debug log
+        try:
+            with open(os.path.join(OUTPUTS_DIR, 'llm_debug.log'), 'a', encoding='utf-8') as lf:
+                lf.write(f"--- RAW RESPONSE ({datetime.datetime.utcnow().isoformat()}) ---\n")
+                lf.write(resp_text[:20000] + "\n")
+        except Exception:
+            pass
+
+        # Try to parse assistant reply as JSON per our prompt guidance
+        try:
+            parsed = json.loads(resp_text)
+            out_parts = []
+            if isinstance(parsed, dict):
+                if 'summary' in parsed:
+                    out_parts.append(f"Summary: {parsed.get('summary','')}")
+                if 'remediation' in parsed:
+                    rem = parsed.get('remediation')
+                    if isinstance(rem, list):
+                        out_parts.append("Remediation: " + "; ".join(rem))
+                    else:
+                        out_parts.append("Remediation: " + str(rem))
+                if 'notes' in parsed:
+                    out_parts.append("Notes: " + str(parsed.get('notes','')))
+                return "\n".join([p for p in out_parts if p])
+            return resp_text
+        except Exception:
+            return resp_text
+    except RequestException:
+        return ''
 SCRIPTS_TO_RUN = [
     "tech_fingerprinter.py",
     "header_checker.py",
@@ -27,6 +103,15 @@ SCRIPTS_TO_RUN = [
     "admin_finder.py",
     "cors_checker.py",
     "http_methods_checker.py"
+]
+
+# Add additional checks mapping to OWASP categories
+SCRIPTS_TO_RUN += [
+    "tls_checker.py",
+    "integrity_checker.py",
+    "config_checker.py",
+    "logging_checker.py",
+    "auth_checker.py",
 ]
 
 PROJECT_DIR = os.path.dirname(__file__)
@@ -53,14 +138,15 @@ def classify_line(line: str) -> Tuple[str, str]:
             return kw, sev
     return '', ''
 
-def run_script_and_capture(script: str, target: str) -> Tuple[str, List[dict], List[str]]:
+def run_script_and_capture(script: str, target: str) -> Tuple[str, List[dict], List[str], str]:
     """
-    Run a script and return raw output, parsed findings, and suggestions.
-    Returns (output, findings_list, suggestions_list)
+    Run a script and return raw output, parsed findings, suggestions, and an
+    AI analysis string from the LLM server.
+    Returns (output, findings_list, suggestions_list, ai_analysis)
     """
     path = os.path.join(PROJECT_DIR, script)
     if not os.path.exists(path):
-        return f"Script missing: {script}\n", [], []
+        return f"Script missing: {script}\n", [], [], ''
     try:
         proc = subprocess.run([sys.executable, path, target],
                               capture_output=True, text=True, timeout=120)
@@ -100,9 +186,45 @@ def run_script_and_capture(script: str, target: str) -> Tuple[str, List[dict], L
             if kw:
                 findings.append({'line': line, 'keyword': kw, 'severity': sev, 'script': script})
         
-        return out, findings, suggestions
+        # Prepare a concise prompt for the LLM summarising findings and suggestions
+        try:
+            # Include test name and a short reason/description before findings
+            reason = ''
+            try:
+                reason = get_description(script) or ''
+            except Exception:
+                reason = ''
+            prompt_lines = [f"AI SECURITY ANALYSIS", f"Test: {script}", f"Reason: {reason}", "\nFindings:"]
+            if findings:
+                for f in findings:
+                    prompt_lines.append(f"- {f.get('line','')}")
+            else:
+                prompt_lines.append("- No automated findings detected.")
+            prompt_lines.append("\nSuggestions:")
+            if suggestions:
+                for s in suggestions[:10]:
+                    prompt_lines.append(f"- {s}")
+            else:
+                prompt_lines.append("- No explicit suggestions captured.")
+            # Include a short excerpt of raw output to give context
+            if out:
+                excerpt = out[:2000]
+                prompt_lines.append("\nOutput excerpt:")
+                prompt_lines.append(excerpt)
+
+            prompt_text = '\n'.join(prompt_lines)
+            # Ask the LLM to respond with a compact JSON object for easy parsing
+            system = ('You are a security analyst. Respond ONLY with a valid JSON object '
+                      'with keys: "summary" (concise but at least 2-3 sentences), '
+                      '"remediation" (an array of remediation steps or a short string; each item should be 2-3 sentences), '
+                      'and optional "notes" (if present, provide 2-3 sentences). Return only the JSON object and no extra commentary. Keep the response machine-parseable.')
+            ai_analysis = query_llm(prompt_text, system_prompt=system)
+        except Exception:
+            ai_analysis = ''
+
+        return out, findings, suggestions, ai_analysis
     except Exception as e:
-        return f"Error running {script}: {e}\n", [{'line': str(e), 'keyword': 'Error', 'severity': 'Low', 'script': script}], []
+        return f"Error running {script}: {e}\n", [{'line': str(e), 'keyword': 'Error', 'severity': 'Low', 'script': script}], [], ''
 
 def find_screenshot_for_target(target: str) -> Tuple[str, str]:
     """
@@ -212,6 +334,21 @@ def build_html_report(title: str, sections: List[dict], summary: dict, screensho
 
     html_parts.append("</div>")  # end summary
 
+    # LLM Ideas Card (aggregate AI analyses if present)
+    llm_ideas = summary.get('llm_ideas', [])
+    html_parts.append("<div class='card'><h3>LLM Ideas & Analysis</h3>")
+    if llm_ideas:
+        html_parts.append("<ol>")
+        for item in llm_ideas:
+            # item expected as dict: {'script':..., 'analysis':...}
+            script = html.escape(item.get('script',''))
+            analysis = html.escape(item.get('analysis',''))
+            html_parts.append(f"<li><strong>{script}:</strong> {analysis}</li>")
+        html_parts.append("</ol>")
+    else:
+        html_parts.append("<p style='color:#666;'>No LLM analysis available.</p>")
+    html_parts.append("</div>")
+
     # Full sections with descriptions and suggestions
     for sec in sections:
         script_name = sec['name']
@@ -231,6 +368,13 @@ def build_html_report(title: str, sections: List[dict], summary: dict, screensho
                 clean_suggestion = suggestion.lstrip('0123456789.- ')
                 html_parts.append(f"<li>{html.escape(clean_suggestion)}</li>")
             html_parts.append("</ol>")
+            html_parts.append("</div>")
+        # Add AI analysis if present
+        ai_text = sec.get('ai_analysis')
+        if ai_text:
+            html_parts.append("<div class='card'><h3>AI SECURITY ANALYSIS</h3>")
+            # keep it brief in the section view
+            html_parts.append(f"<p>{html.escape(ai_text[:1000])}</p>")
             html_parts.append("</div>")
         
         html_parts.append("<h4>Test Output:</h4>")
@@ -307,6 +451,7 @@ def main():
     target = args.target if '://' in args.target else 'http://' + args.target
     sections = []
     aggregated_findings = []
+    aggregated_llm_ideas = []
 
     # Ensure outputs dir exists and take a screenshot first
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
@@ -314,9 +459,11 @@ def main():
 
     for script in SCRIPTS_TO_RUN:
         print(f"[*] Running {script} ...")
-        output, findings, suggestions = run_script_and_capture(script, target)
-        sections.append({'name': script, 'output': output, 'suggestions': suggestions})
+        output, findings, suggestions, ai_analysis = run_script_and_capture(script, target)
+        sections.append({'name': script, 'output': output, 'suggestions': suggestions, 'ai_analysis': ai_analysis})
         aggregated_findings.extend(findings)
+        if ai_analysis:
+            aggregated_llm_ideas.append({'script': script, 'analysis': ai_analysis})
 
     # Build summary
     counts = {'High':0,'Medium':0,'Low':0}
@@ -330,6 +477,8 @@ def main():
         'counts': counts,
         'findings': sorted_findings
     }
+    if aggregated_llm_ideas:
+        summary['llm_ideas'] = aggregated_llm_ideas
 
     inline_b64, screenshot_file = find_screenshot_for_target(target)
 

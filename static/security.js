@@ -21,7 +21,11 @@ async function runSelected() {
 async function runLevel() {
   const url = document.getElementById('url').value;
   const level = document.getElementById('level').value;
-  await run(url, {level});
+  if (!url) { alert('Enter a target URL'); return; }
+  // stream via server
+  const resp = await fetch('/security.php?stream=1', {method:'POST', headers:{'Content-Type':'application/json','X-Stream':'1'}, body: JSON.stringify({url, level})});
+  const data = await resp.text();
+  document.getElementById('results').textContent = data;
 }
 
 async function runAll() {

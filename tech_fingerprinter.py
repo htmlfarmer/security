@@ -174,7 +174,7 @@ def extract_versions_from_html(html_content):
 
 def check_technology_versions(url):
     """Detect technologies and check their versions against known latest."""
-    print(color(f"[*] Checking technology versions on {url}", CYAN))
+    print(color(f"[*] Checking technology versions on {url}", CYAN), flush=True)
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=10, verify=False)
@@ -183,22 +183,22 @@ def check_technology_versions(url):
         versions = extract_versions_from_html(html_content)
         
         if versions:
-            print(color("[+] Detected library versions:", GREEN))
+            print(color("[+] Detected library versions:", GREEN), flush=True)
             for lib, version in versions.items():
                 latest = KNOWN_LATEST_VERSIONS.get(lib, "unknown")
                 if latest != "unknown" and is_outdated(version, latest):
                     status = color(f"OUTDATED (latest: {latest})", RED + BOLD)
-                    print(f"  - {color(lib, CYAN)}: {color(version, YELLOW)} [{status}]")
+                    print(f"  - {color(lib, CYAN)}: {color(version, YELLOW)} [{status}]", flush=True)
                 elif latest != "unknown":
                     status = color("UP-TO-DATE", GREEN)
-                    print(f"  - {color(lib, CYAN)}: {color(version, GREEN)} [{status}]")
+                    print(f"  - {color(lib, CYAN)}: {color(version, GREEN)} [{status}]", flush=True)
                 else:
-                    print(f"  - {color(lib, CYAN)}: {color(version, CYAN)} [version unknown]")
+                    print(f"  - {color(lib, CYAN)}: {color(version, CYAN)} [version unknown]", flush=True)
         else:
-            print(color("[-] No versioned libraries detected in asset URLs.", YELLOW))
+                print(color("[-] No versioned libraries detected in asset URLs.", YELLOW), flush=True)
     
     except requests.RequestException as e:
-        print(color(f"Error: Could not connect to {url}. Details: {e}", RED))
+        print(color(f"Error: Could not connect to {url}. Details: {e}", RED), flush=True)
 
 def check_technologies(url):
     """
@@ -265,7 +265,7 @@ def main():
     else:
         target_url = args.url
 
-    print(color(f"[*] Analyzing {target_url}...", CYAN))
+    print(color(f"[*] Analyzing {target_url}...", CYAN), flush=True)
     
     # Suppress InsecureRequestWarning for self-signed certs
     requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
@@ -274,14 +274,14 @@ def main():
     technologies = check_technologies(target_url)
     
     if technologies:
-        print(color("\n[+] Detected Technologies:", GREEN))
+        print(color("\n[+] Detected Technologies:", GREEN), flush=True)
         for tech in sorted(technologies):
-            print(f"  - {tech}")
+            print(f"  - {tech}", flush=True)
     else:
-        print(color("\n[-] Could not identify any specific technologies.", YELLOW))
+        print(color("\n[-] Could not identify any specific technologies.", YELLOW), flush=True)
     
     # Check specific library versions
-    print()
+    print("", flush=True)
     check_technology_versions(target_url)
 
 if __name__ == "__main__":
