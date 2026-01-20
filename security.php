@@ -687,33 +687,42 @@ if ($method === 'POST') {
         stream_set_blocking($pipes[1], false);
         stream_set_blocking($pipes[2], false);
         while (true) {
-          $status = proc_get_status($process);
-          $running = $status['running'];
           $read = array();
           if (!feof($pipes[1])) $read[] = $pipes[1];
           if (!feof($pipes[2])) $read[] = $pipes[2];
-          if ($read) {
-            $write = null; $except = null;
-            $n = @stream_select($read, $write, $except, 0, 200000);
-            if ($n > 0) {
-              foreach ($read as $rpipe) {
-                $chunk = fgets($rpipe);
-                if ($chunk !== false) {
-                  if ($rpipe === $pipes[1]) {
-                    $entry_stdout .= $chunk;
-                    if ($stream) {
-                      stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stdout' => $entry_stdout));
-                    }
-                  } else {
-                    $entry_stderr .= $chunk;
-                    if ($stream) {
-                      stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stderr' => $entry_stderr));
-                    }
+          
+          if (!$read) {
+            $status = proc_get_status($process);
+            if (!$status['running']) break;
+            usleep(50000);
+            continue;
+          }
+
+          $write = null; $except = null;
+          $n = @stream_select($read, $write, $except, 0, 100000);
+          if ($n > 0) {
+            foreach ($read as $rpipe) {
+              $chunk = fread($rpipe, 8192);
+              if ($chunk !== false && strlen($chunk) > 0) {
+                if ($rpipe === $pipes[1]) {
+                  $entry_stdout .= $chunk;
+                  if ($stream) {
+                    stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stdout' => $entry_stdout));
+                  }
+                } else {
+                  $entry_stderr .= $chunk;
+                  if ($stream) {
+                    stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stderr' => $entry_stderr));
                   }
                 }
               }
             }
           }
+          
+          // Check process status after trying to read
+          $status = proc_get_status($process);
+          if (!$status['running'] && feof($pipes[1]) && feof($pipes[2])) break;
+
           // Check for a stop request
           if (file_exists($stop_file)) {
             @proc_terminate($process);
@@ -724,8 +733,7 @@ if ($method === 'POST') {
             $entry_stderr = $entry_stderr ?: 'Stopped by user';
             break;
           }
-          if (!$running) break;
-          usleep(100000);
+          usleep(10000);
         }
         fclose($pipes[1]); fclose($pipes[2]);
         $ret = proc_close($process);
