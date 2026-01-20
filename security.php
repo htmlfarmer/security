@@ -110,25 +110,21 @@ function stream_json_line($obj) {
 function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $mode = 'structured') {
   $llm_url = getenv('LLM_SERVER_URL') ?: 'http://ashy.tplinkdns.com:5005/ask';
   $prompt = "AI SECURITY ANALYSIS\nTest: $script\n";
-  if ($reason) { $prompt .= "Reason: $reason\n"; }
-  $prompt .= "\nFindings:\n";
-  if ($findings && is_array($findings) && count($findings)) {
-    foreach ($findings as $f) { $prompt .= "- " . $f . "\n"; }
-  } else {
-    $prompt .= "- No automated findings detected.\n";
-  }
-  $prompt .= "\nSuggestions:\n";
-  if ($suggestions && is_array($suggestions) && count($suggestions)) {
-    foreach (array_slice($suggestions,0,10) as $s) { $prompt .= "- " . $s . "\n"; }
-  } else {
-    $prompt .= "- No explicit suggestions captured.\n";
-  }
+  $prompt .= "Analyze the following raw scanner output and identify security implications.\n";
+
   if ($output) {
-    $excerpt = substr($output, 0, 2000);
-    $prompt .= "\nOutput excerpt:\n" . $excerpt;
+    // Increase excerpt size for better LLM context (up to 4000 chars)
+    $excerpt = substr($output, 0, 4000);
+    $prompt .= "\nRaw Output Excerpt:\n" . $excerpt;
   }
 
-  $system = 'You are a security analyst. Respond ONLY with a valid JSON object with keys: "summary" (concise but at least 2-3 sentences), "remediation" (an array of remediation steps or a short string; each item should be 2-3 sentences), and optional "notes" (if present, provide 2-3 sentences). Return only the JSON object and no extra commentary. Keep the JSON machine-parseable.';
+  $system = 'You are an expert security analyst. Analyze the provided scanner output and respond ONLY with a valid JSON object. Do not include any other text.
+  Keys required:
+  "summary": A concise overview of the results (2-3 sentences).
+  "reason": Describe what you think the technical purpose or reason for running this specific test is, based on the output.
+  "findings": A list or summary of specific vulnerabilities or security concerns you identified.
+  "remediation": Actionable suggestions to mitigate the identified risks.';
+  
   // If caller requested free-text mode, do not include a strict system prompt forcing JSON
   $payload_array = array('prompt' => $prompt);
   if ($mode === 'free-text') {
@@ -141,9 +137,11 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
   // Debug log to server error log for troubleshooting
   error_log("LLM request for $script to $llm_url; prompt length=" . strlen($prompt));
 
-  // If streaming, send prompt to client for debug console
+  // If streaming, send prompt to client for debug console and indicate LLM started
   if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
     stream_json_line(array('type' => 'llm_request', 'script' => $script, 'prompt' => $prompt));
+    // indicate the LLM invocation has started (client can show pending/attempts)
+    stream_json_line(array('type' => 'llm_status', 'script' => $script, 'status' => 'started'));
   }
 
   // Support configurable timeout (env LLM_TIMEOUT) and a simple retry mechanism
@@ -151,6 +149,11 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
   $max_attempts = intval(getenv('LLM_RETRIES') ?: 2);
   $resp = false; $err = ''; $code = 0;
   for ($attempt = 1; $attempt <= $max_attempts; $attempt++) {
+    // announce the attempt when streaming
+    if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
+      stream_json_line(array('type' => 'llm_status', 'script' => $script, 'status' => 'attempt', 'attempt' => $attempt));
+    }
+
     $ch = curl_init($llm_url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_HTTPHEADER, array('Content-Type: application/json'));
@@ -166,6 +169,10 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
     $dur = round(microtime(true) - $start, 2);
     error_log("LLM attempt $attempt/$max_attempts for $script: HTTP $code, err='" . $err . "', dur={$dur}s, resp_len=" . strlen($resp));
     if (!$err && $code >= 200 && $code < 300 && $resp) break;
+    // announce attempt-level error to UI
+    if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
+      stream_json_line(array('type' => 'llm_status', 'script' => $script, 'status' => 'attempt_error', 'attempt' => $attempt, 'http_code' => $code, 'err' => $err));
+    }
     // small backoff before retrying
     if ($attempt < $max_attempts) { usleep(300000); }
   }
@@ -174,11 +181,18 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
   if ($err) {
     $out['raw'] = '';
     $out['analysis'] = 'LLM request error: ' . $err;
+    // stream error to client when streaming
+    if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
+      stream_json_line(array('type' => 'llm_error', 'script' => $script, 'message' => $out['analysis']));
+    }
     return $out;
   }
   if (!$resp || $code < 200 || $code >= 300) {
     $out['raw'] = $resp ?: '';
     $out['analysis'] = "LLM server returned HTTP $code" . ($resp ? ": " . substr($resp,0,200) : '');
+    if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
+      stream_json_line(array('type' => 'llm_error', 'script' => $script, 'message' => $out['analysis']));
+    }
     return $out;
   }
 
@@ -199,6 +213,11 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
     if ($parsed && is_array($parsed)) {
       $parts = array();
       if (isset($parsed['summary'])) $parts[] = 'Summary: ' . trim($parsed['summary']);
+      if (isset($parsed['reason'])) $parts[] = 'Inferred Purpose: ' . trim($parsed['reason']);
+      if (isset($parsed['findings'])) {
+        $f = $parsed['findings'];
+        $parts[] = 'AI Findings: ' . (is_array($f) ? implode('; ', $f) : trim($f));
+      }
       if (isset($parsed['remediation'])) {
         $rem = $parsed['remediation'];
         if (is_array($rem)) $parts[] = 'Remediation: ' . implode('; ', $rem);
@@ -209,6 +228,10 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
     } else {
       // fallback: use raw assistant text
       $out['analysis'] = $resp_text;
+    }
+    // stream result to client when streaming (analysis and raw may be large; truncate raw to 2k)
+    if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
+      stream_json_line(array('type' => 'llm_result', 'script' => $script, 'analysis' => $out['analysis'], 'raw' => substr($out['raw'],0,2000)));
     }
   }
   return $out;
@@ -319,6 +342,19 @@ if ($method === 'POST' && $action === 'clear_stop') {
   respond_json(array('ok' => true, 'msg' => 'cleared'));
 }
 
+// Handle LLM connection test
+if ($method === 'GET' && $action === 'test_llm') {
+  $prompt = "Respond with 'Connected'";
+  $res = call_llm_direct($prompt, "You are a connectivity tester.", 5);
+  $llm_url = getenv('LLM_SERVER_URL') ?: 'http://ashy.tplinkdns.com:5005/ask';
+  respond_json(array(
+    'ok' => ($res['code'] >= 200 && $res['code'] < 300),
+    'llm' => $res,
+    'url' => $llm_url,
+    'method' => 'POST'
+  ));
+}
+
 // Handle follow-up LLM ask requests from the UI
 if ($method === 'POST' && $action === 'ask_llm') {
   $body = json_decode(file_get_contents('php://input'), true);
@@ -403,6 +439,9 @@ if ($method === 'POST') {
     if (file_exists($stop_file)) { @unlink($stop_file); }
     if (file_exists($pid_file)) { @unlink($pid_file); }
     foreach ($tests_to_run as $t) {
+      // Check for a stop request before starting a new test
+      if (file_exists($stop_file)) break;
+
       $entry = array('script' => $t, 'script_path' => '', 'stdout' => '', 'stderr' => '', 'findings' => array(), 'ai_analysis' => '');
 
       // Special-case: run nmap directly (if selected)
@@ -416,15 +455,12 @@ if ($method === 'POST') {
         $conn_script = __DIR__ . DIRECTORY_SEPARATOR . 'simple_connect_scan.py';
         $timeout = 'timeout 180s';
         $script_timeout = 180;
+        $cmd = 'exec ' . $timeout . ' ' . escapeshellcmd($python) . ' ' . escapeshellarg($conn_script) . ' ' . escapeshellarg($host) . ' --ports ' . escapeshellarg($ports) . ' --timeout 1.5 --workers 50 2>&1';
         if ($stream) { stream_json_line(array('type' => 'start', 'script' => $t, 'timeout' => $script_timeout, 'cmd' => $cmd)); }
         $entry['cmd'] = $cmd;
-        $cmd = $timeout . ' ' . escapeshellcmd($python) . ' ' . escapeshellarg($conn_script) . ' ' . escapeshellarg($host) . ' --ports ' . escapeshellarg($ports) . ' --timeout 1.5 --workers 50 2>&1';
         $entry_stdout = '';
         $entry_stderr = '';
         $descriptorspec = array(0 => array('pipe','r'), 1 => array('pipe','w'), 2 => array('pipe','w'));
-        // If setsid is available, use it to create a new process session so we can kill the group later
-        $setsid_bin = trim(@shell_exec('command -v setsid 2>/dev/null'));
-        if ($setsid_bin) { $cmd = $setsid_bin . ' ' . $cmd; }
         $process = @proc_open($cmd, $descriptorspec, $pipes);
         if (is_resource($process)) {
           $pinfo = proc_get_status($process);
@@ -522,15 +558,12 @@ if ($method === 'POST') {
         $conn_script = __DIR__ . DIRECTORY_SEPARATOR . 'simple_connect_scan.py';
         $timeout = 'timeout 180s';
         $script_timeout = 180;
+        $cmd = 'exec ' . $timeout . ' ' . escapeshellcmd($python) . ' ' . escapeshellarg($conn_script) . ' ' . escapeshellarg($host) . ' --ports ' . escapeshellarg($ports) . ' --timeout 1.5 --workers 50 2>&1';
         if ($stream) { stream_json_line(array('type' => 'start', 'script' => $t, 'timeout' => $script_timeout, 'cmd' => $cmd)); }
         $entry['cmd'] = $cmd;
-        $cmd = $timeout . ' ' . escapeshellcmd($python) . ' ' . escapeshellarg($conn_script) . ' ' . escapeshellarg($host) . ' --ports ' . escapeshellarg($ports) . ' --timeout 1.5 --workers 50 2>&1';
         $entry_stdout = '';
         $entry_stderr = '';
         $descriptorspec = array(0 => array('pipe','r'), 1 => array('pipe','w'), 2 => array('pipe','w'));
-        // If setsid is available, use it to create a new process session so we can kill the group later
-        $setsid_bin = trim(@shell_exec('command -v setsid 2>/dev/null'));
-        if ($setsid_bin) { $cmd = $setsid_bin . ' ' . $cmd; }
         $process = @proc_open($cmd, $descriptorspec, $pipes);
         if (is_resource($process)) {
           $pinfo = proc_get_status($process);
@@ -555,14 +588,12 @@ if ($method === 'POST') {
                     if ($rpipe === $pipes[1]) {
                       $entry_stdout .= $chunk;
                       if ($stream) {
-                        $tokens = preg_split('/(\s+)/', $chunk, -1, PREG_SPLIT_DELIM_CAPTURE);
-                        foreach ($tokens as $tok) { stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $tok, 'stdout' => $entry_stdout)); }
+                        stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stdout' => $entry_stdout));
                       }
                     } else {
                       $entry_stderr .= $chunk;
                       if ($stream) {
-                        $tokens = preg_split('/(\s+)/', $chunk, -1, PREG_SPLIT_DELIM_CAPTURE);
-                        foreach ($tokens as $tok) { stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $tok, 'stderr' => $entry_stderr)); }
+                        stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stderr' => $entry_stderr));
                       }
                     }
                   }
@@ -639,16 +670,13 @@ if ($method === 'POST') {
         if (!$host) { $host = preg_replace('#^https?://#', '', $url); $host = preg_replace('#/.*$#', '', $host); }
         $targetArg = $host;
       }
+      $cmd = 'exec ' . $timeout . ' ' . escapeshellcmd($python) . ' ' . escapeshellarg($script_path) . ' ' . escapeshellarg($targetArg) . ' 2>&1';
       if ($stream) { stream_json_line(array('type' => 'start', 'script' => $t, 'timeout' => $script_timeout, 'cmd' => $cmd)); }
       $entry['cmd'] = $cmd;
-      $cmd = $timeout . ' ' . escapeshellcmd($python) . ' ' . escapeshellarg($script_path) . ' ' . escapeshellarg($targetArg) . ' 2>&1';
 
       $entry_stdout = '';
       $entry_stderr = '';
       $descriptorspec = array(0 => array('pipe','r'), 1 => array('pipe','w'), 2 => array('pipe','w'));
-      // If setsid is available, use it to create a new process session so we can kill the group later
-      $setsid_bin = trim(@shell_exec('command -v setsid 2>/dev/null'));
-      if ($setsid_bin) { $cmd = $setsid_bin . ' ' . $cmd; }
       $process = @proc_open($cmd, $descriptorspec, $pipes);
       if (is_resource($process)) {
         // track pid for stop/kill support
@@ -674,14 +702,12 @@ if ($method === 'POST') {
                   if ($rpipe === $pipes[1]) {
                     $entry_stdout .= $chunk;
                     if ($stream) {
-                      $tokens = preg_split('/(\s+)/', $chunk, -1, PREG_SPLIT_DELIM_CAPTURE);
-                      foreach ($tokens as $tok) { stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $tok, 'stdout' => $entry_stdout)); }
+                      stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stdout' => $entry_stdout));
                     }
                   } else {
                     $entry_stderr .= $chunk;
                     if ($stream) {
-                      $tokens = preg_split('/(\s+)/', $chunk, -1, PREG_SPLIT_DELIM_CAPTURE);
-                      foreach ($tokens as $tok) { stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $tok, 'stderr' => $entry_stderr)); }
+                      stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stderr' => $entry_stderr));
                     }
                   }
                 }
@@ -729,13 +755,13 @@ if ($method === 'POST') {
       // Query the LLM server for a short AI analysis (non-blocking best-effort)
       if (!empty($enable_llm)) {
         try {
-          // Provide a reason string so the LLM knows why this test was run
-          $reason = $level ? "Selected level: $level" : (isset($body['tests']) ? "User selected specific tests" : "Default/basic level run");
-          $aiobj = call_llm_php($t, $entry['findings'], $entry['findings'], $entry['stdout'], $reason, $llm_mode);
-          if ($aiobj && is_array($aiobj)) {
-            if (!empty($aiobj['analysis'])) { $entry['ai_analysis'] = $aiobj['analysis']; }
-            if (!empty($aiobj['raw'])) { $entry['ai_raw'] = $aiobj['raw']; }
-            if (!empty($aiobj['analysis'])) { $aggregated_llm_ideas[] = array('script' => $t, 'analysis' => $aiobj['analysis']); }
+            // Provide a reason string so the LLM knows why this test was run
+            $reason = $level ? "Selected level: $level" : (isset($body['tests']) ? "User selected specific tests" : "Default/basic level run");
+            $aiobj = call_llm_php($t, $entry['findings'], $entry['findings'], $entry['stdout'], $reason, $llm_mode);
+            if ($aiobj && is_array($aiobj)) {
+              if (!empty($aiobj['analysis'])) { $entry['ai_analysis'] = $aiobj['analysis']; }
+              if (!empty($aiobj['raw'])) { $entry['ai_raw'] = $aiobj['raw']; }
+              if (!empty($aiobj['analysis'])) { $aggregated_llm_ideas[] = array('script' => $t, 'analysis' => $aiobj['analysis']); }
           }
         } catch (Exception $e) { /* ignore LLM failures */ }
       }
@@ -800,10 +826,21 @@ if ($method === 'POST') {
     .findings{background:#fff8e1;padding:8px;margin-top:8px;border-radius:4px}
     section.script-result{border:1px solid #eee;padding:8px;margin:8px 0;border-radius:6px;background:var(--panel)}
     h1{margin-top:0}
+    /* LLM status animations */
+    .pulse-dot.online { background: #28a745 !important; box-shadow: 0 0 0 rgba(40, 167, 69, 0.4); animation: pulse 2s infinite; }
+    .pulse-dot.offline { background: #dc3545 !important; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(40, 167, 69, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(40, 167, 69, 0); } 100% { box-shadow: 0 0 0 0 rgba(40, 167, 69, 0); } }
   </style>
 </head>
 <body>
-  <h1>Security Audit (LLM AI WEBSITE SECURITY VULNERABILITY ASSESSMENT)</h1>
+  <div style="display:flex; align-items:center; gap:15px; margin-bottom:10px;">
+    <h1 style="margin:0;">Security Audit</h1>
+    <div id="llm-status-badge" style="padding:4px 10px; border-radius:15px; background:#eee; font-size:12px; font-weight:bold; color:#666; display:flex; align-items:center; gap:6px;">
+      <span class="pulse-dot" style="width:8px; height:8px; border-radius:50%; background:#bbb;"></span>
+      LLM: <span id="llm-status-text">Checking...</span>
+    </div>
+    <button id="btn-test-llm" class="btn ghost" style="padding:4px 8px; font-size:11px;">Test Connection</button>
+  </div>
   <label>Target URL: <input id="url" placeholder="example.com" type="text"></label>
   <div id="tests">
     <?php
@@ -852,6 +889,8 @@ if ($method === 'POST') {
 
   <h3>Summary</h3>
   <div id="summary"></div>
+  <!-- LLM debug / prompt console (populated during scanning when LLM prompts are emitted) -->
+  <div id="ai-console" style="margin-top:8px"></div>
   <div id="global-progress" style="margin:12px 0">
     <div style="height:10px;background:#eef5ff;border-radius:8px;overflow:hidden">
       <div id="global-progress-bar" style="height:10px;width:0%;background:linear-gradient(90deg,var(--accent),#6cc1ff);transition:width .2s;border-radius:8px"></div>
@@ -861,420 +900,10 @@ if ($method === 'POST') {
   <div id="results"></div>
 
   <script>
-    // LLM server URL for direct browser calls (override via env LLM_SERVER_URL)
-    const LLM_SERVER_URL = '<?php echo htmlspecialchars(getenv("LLM_SERVER_URL") ?: "http://ashy.tplinkdns.com:5005/ask"); ?>';
-    // System prompt for follow-up questions (requires structured JSON)
-    const FOLLOWUP_SYSTEM_PROMPT = '<?php echo htmlspecialchars("You are a concise security analyst. Respond ONLY with a JSON object with keys: \"answer\" (string), \"severity\" (High|Medium|Low), and \"confidence\" (a number between 0.0 and 1.0). Do not include any other text outside the JSON."); ?>';
-    // Helper: validate structured response contains required fields
-    function validateStructured(parsed){
-      const required = ['answer','severity','confidence'];
-      const missing = [];
-      if (!parsed || typeof parsed !== 'object') { return {ok:false, missing: required.slice(), msg: 'Not an object'}; }
-      required.forEach(k => { if (!(k in parsed)) missing.push(k); });
-      return { ok: missing.length === 0, missing: missing };
-    }
-    async function loadScripts(){
-      const r = await fetch('?action=scripts');
-      const data = await r.json();
-      const container = document.getElementById('tests'); container.innerHTML='';
-        data.scripts.forEach(s=>{
-          const id='chk_'+s;
-          const label=document.createElement('label'); label.className='test-card'; label.setAttribute('data-key', s);
-          const filename = (data.labels && data.labels[s]) ? data.labels[s] : '';
-          const icon = (data.icons && data.icons[s]) ? data.icons[s] : '🔎';
-          label.innerHTML=`<input type="checkbox" id="${id}" value="${s}"><span class="icon">${icon}</span><div class="meta"><strong>${s}</strong><small>${filename}</small><span class="status">Idle</span></div>`;
-          container.appendChild(label);
-        });
-    }
-
-    async function runPayload(payload){
-      const resp = await fetch('', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
-      return await resp.json();
-    }
-
-    function createOrUpdateEntry(entry){
-      const res=document.getElementById('results');
-      let el = document.querySelector(`section.script-result[data-script="${entry.script}"]`);
-      if (!el) {
-        el = document.createElement('section'); el.className='script-result'; el.setAttribute('data-script', entry.script);
-        const h=document.createElement('h4'); h.textContent = entry.script; el.appendChild(h);
-          const cmdPre = document.createElement('pre'); cmdPre.className='cmd'; cmdPre.style.background='#f0f8ff'; cmdPre.style.padding='6px'; cmdPre.style.borderLeft='4px solid #cce'; cmdPre.style.display='none'; cmdPre.style.whiteSpace='pre-wrap'; el.appendChild(cmdPre);
-        const pre=document.createElement('pre'); pre.className='stdout'; el.appendChild(pre);
-        const err=document.createElement('pre'); err.className='stderr'; el.appendChild(err);
-        const findings=document.createElement('div'); findings.className='findings'; el.appendChild(findings);
-        res.appendChild(el);
-      }
-      el.querySelector('pre.stdout').textContent = entry.stdout || '';
-      const errEl = el.querySelector('pre.stderr'); errEl.textContent = entry.stderr || ''; errEl.style.display = entry.stderr ? 'block' : 'none';
-      const fEl = el.querySelector('.findings'); if (entry.findings && entry.findings.length){ fEl.innerHTML = '<strong>Findings:</strong><ul>' + entry.findings.map(x=>`<li>${x}</li>`).join('') + '</ul>'; } else { fEl.innerHTML = ''; }
-      // AI analysis
-      let aiEl = el.querySelector('.ai-analysis');
-      if (!aiEl) { aiEl = document.createElement('div'); aiEl.className = 'ai-analysis'; aiEl.style.marginTop = '8px'; aiEl.style.background = '#fff8f0'; aiEl.style.padding = '10px'; aiEl.style.borderLeft = '4px solid #ffc107'; el.appendChild(aiEl); }
-      if (entry.ai_analysis) {
-        // Try to parse raw assistant reply (entry.ai_raw) or ai_analysis as JSON and render human-friendly fields
-        let rendered = '';
-        let rawText = entry.ai_raw || entry.ai_analysis || '';
-        let parsed = null;
-        try { parsed = JSON.parse(rawText); } catch (e) { parsed = null; }
-        if (parsed && typeof parsed === 'object') {
-          const parts = [];
-          if (parsed.summary) parts.push('Summary: ' + parsed.summary);
-          if (parsed.remediation) {
-            if (Array.isArray(parsed.remediation)) parts.push('Remediation: ' + parsed.remediation.join('; ')); else parts.push('Remediation: ' + parsed.remediation);
-          }
-          if (parsed.notes) parts.push('Notes: ' + parsed.notes);
-          if (parts.length) rendered = '<div style="white-space:pre-wrap;">' + parts.join('\n\n') + '</div>';
-          else rendered = '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>';
-        } else {
-          // fallback: show the already-prepared analysis string (may be machine-concatenated by server)
-          rendered = '<div style="white-space:pre-wrap;">' + entry.ai_analysis + '</div>';
-        }
-        aiEl.innerHTML = '<strong>AI SECURITY ANALYSIS:</strong><div style="margin-top:6px;">' + rendered + '</div>';
-      } else { aiEl.innerHTML = ''; }
-      // show command that was executed (if available)
-      const cmdEl = el.querySelector('pre.cmd'); if (entry.cmd) { cmdEl.textContent = entry.cmd; cmdEl.style.display = 'block'; } else { cmdEl.style.display = 'none'; }
-      // raw debug area (hidden unless "Show LLM debug" checked)
-      let rawEl = el.querySelector('.ai-raw');
-      if (!rawEl) { rawEl = document.createElement('div'); rawEl.className = 'ai-raw'; rawEl.style.marginTop = '8px'; rawEl.style.background = '#f6f6f6'; rawEl.style.padding = '8px'; rawEl.style.borderLeft = '4px solid #ccc'; rawEl.style.display = 'none'; el.appendChild(rawEl); }
-      if (entry.ai_raw) { rawEl.textContent = entry.ai_raw; } else { rawEl.textContent = ''; }
-      // toggle visibility based on UI checkbox
-      const showDebug = document.getElementById('show-llm-debug');
-      if (showDebug && showDebug.checked && rawEl.textContent) rawEl.style.display = 'block'; else rawEl.style.display = 'none';
-
-      // Follow-up UI: button -> show textarea
-      let followWrap = el.querySelector('.followup-wrap');
-      if (!followWrap) {
-        followWrap = document.createElement('div'); followWrap.className='followup-wrap'; followWrap.style.marginTop='8px';
-        const btn = document.createElement('button'); btn.textContent='Ask follow-up'; btn.className='btn ghost'; btn.style.marginRight='8px';
-        const area = document.createElement('textarea'); area.rows=3; area.style.width='100%'; area.style.display='none'; area.placeholder='Ask a follow-up question about this test...';
-        const send = document.createElement('button'); send.textContent='Send'; send.className='btn'; send.style.display='none'; send.style.marginTop='6px';
-        const respDiv = document.createElement('div'); respDiv.className='followup-response'; respDiv.style.marginTop='8px';
-        followWrap.appendChild(btn); followWrap.appendChild(area); followWrap.appendChild(send); followWrap.appendChild(respDiv);
-        el.appendChild(followWrap);
-
-        btn.addEventListener('click', ()=>{ if (area.style.display==='none'){ area.style.display='block'; send.style.display='inline-block'; area.focus(); } else { area.style.display='none'; send.style.display='none'; } });
-        send.addEventListener('click', async ()=>{
-          const q = area.value && area.value.trim(); if (!q) { alert('Enter a question'); return; }
-          send.disabled = true; send.textContent = 'Asking...';
-          try {
-            // Build a prompt including context and the user's question
-            const prompt_text = `Follow-up question about script: ${entry.script}\nContext:\n${(entry.ai_raw || entry.stdout || '').slice(0,2000)}\n\nQuestion:\n${q}`;
-            // Respect response mode: structured vs free-text
-            const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
-            const payload = { prompt: prompt_text };
-            if (mode === 'structured') payload.system_prompt = FOLLOWUP_SYSTEM_PROMPT;
-            const r = await fetch(LLM_SERVER_URL, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-            const j = await r.json();
-            let display = 'No reply';
-            let rawResp = '';
-            if (j && typeof j.response !== 'undefined') {
-              rawResp = String(j.response || '');
-              // Try to parse any JSON reply and render as human-readable fields if possible
-              let parsed = null;
-              try { parsed = JSON.parse(rawResp); } catch (err) { parsed = null; }
-              if (parsed && typeof parsed === 'object') {
-                // Prefer fields summary/remediation/notes if present
-                let parts = [];
-                if (parsed.summary) parts.push('Summary: ' + parsed.summary);
-                if (parsed.remediation) {
-                  if (Array.isArray(parsed.remediation)) parts.push('Remediation: ' + parsed.remediation.join('; ')); else parts.push('Remediation: ' + parsed.remediation);
-                }
-                if (parsed.notes) parts.push('Notes: ' + parsed.notes);
-                // If we assembled parts, show them nicely; otherwise fall back to showing parsed JSON
-                if (parts.length) {
-                  display = '<div style="white-space:pre-wrap;">' + parts.join('\n\n') + '</div>';
-                } else if (mode === 'structured') {
-                  // existing structured validation for answer/severity/confidence
-                  const v = validateStructured(parsed);
-                  let warn = '';
-                  if (!v.ok) { warn = `<div style="color:#a00;margin-bottom:8px">Warning: structured response missing fields: ${v.missing.join(', ')}</div>`; }
-                  display = warn + '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>';
-                } else {
-                  display = '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>';
-                }
-              } else {
-                // non-JSON reply
-                if (mode === 'structured') {
-                  display = '<div style="color:#a00;margin-bottom:8px">Warning: expected JSON structured reply but assistant returned non-JSON text.</div><pre style="white-space:pre-wrap;">' + rawResp + '</pre>';
-                } else {
-                  display = '<pre style="white-space:pre-wrap;">' + rawResp + '</pre>';
-                }
-              }
-            }
-            respDiv.innerHTML = '<strong>Follow-up reply:</strong>' + display;
-            // show raw debug if enabled
-            if (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked && rawResp) {
-              const dbg = document.createElement('pre'); dbg.style.whiteSpace='pre-wrap'; dbg.textContent = rawResp; respDiv.appendChild(dbg);
-            }
-          } catch (e) {
-            respDiv.innerHTML = '<span style="color:#a00">Request failed: '+String(e)+'</span>';
-          } finally { send.disabled = false; send.textContent='Send'; }
-        });
-      }
-      // update card status
-      setCardStatus(entry.script, entry.stderr ? 'Error' : (entry.findings && entry.findings.length ? 'Done' : 'Done'), entry.stderr ? 'error' : 'done');
-    }
-
-    function setCardStatus(script, status, cls){
-      const card = document.querySelector(`#tests label.test-card[data-key="${script}"]`);
-      if (!card) return;
-      const st = card.querySelector('.status'); if (st) st.textContent = status;
-      card.classList.remove('running','done','error'); if (cls) card.classList.add(cls);
-    }
-
-    function setCardRunning(script){
-      const card = document.querySelector(`#tests label.test-card[data-key="${script}"]`);
-      if (!card) return;
-      const st = card.querySelector('.status'); if (st) st.innerHTML = 'Running <span class="spinner"></span>';
-      card.classList.remove('done','error'); card.classList.add('running');
-    }
-
-    // per-card progress management
-    const _cardProgress = {};
-    function createCardProgress(script, timeoutSec){
-      const card = document.querySelector(`#tests label.test-card[data-key="${script}"]`);
-      if (!card) return;
-      // avoid duplicate
-      if (card.querySelector('.card-progress')) return;
-      const barWrap = document.createElement('div'); barWrap.className='card-progress'; barWrap.style.marginTop='8px'; barWrap.style.height='6px'; barWrap.style.background='#f0f6ff'; barWrap.style.borderRadius='6px';
-      const bar = document.createElement('div'); bar.className='card-progress-bar'; bar.style.width='0%'; bar.style.height='6px'; bar.style.background='linear-gradient(90deg,var(--accent),#6cc1ff)'; bar.style.borderRadius='6px'; barWrap.appendChild(bar);
-      card.appendChild(barWrap);
-      const start = Date.now();
-      const timeoutMs = (timeoutSec||60)*1000;
-      _cardProgress[script] = {interval:setInterval(()=>{
-        const elapsed = Date.now()-start; const pct = Math.min(99, Math.floor((elapsed/timeoutMs)*100)); bar.style.width = pct+'%';
-      }, 500), bar: bar};
-    }
-
-    function finishCardProgress(script){
-      const p = _cardProgress[script]; if (!p) return; clearInterval(p.interval); p.bar.style.width = '100%'; delete _cardProgress[script];
-    }
-
-    async function runSelected(){
-      const url=document.getElementById('url').value;
-      const checks=Array.from(document.querySelectorAll('#tests input:checked')).map(i=>i.value);
-      const ports = document.getElementById('ports').value;
-      if(!url){alert('Enter a target URL'); return;}
-      if (!checks.length) { alert('Select at least one test'); return; }
-      // clear previous results and summary
-      document.getElementById('results').innerHTML = ''; document.getElementById('summary').innerHTML = '';
-      // mark selected cards running
-      checks.forEach(s=>setCardRunning(s));
-      // setup per-card progress and global progress
-      checks.forEach(s=>createCardProgress(s, 60));
-      let totalScripts = checks.length; let completedScripts = 0;
-      document.getElementById('global-progress-bar').style.width = '5%';
-
-      // create an AbortController for this run so the UI can cancel it
-      window.currentAbortController = new AbortController();
-      const resp = await fetch('?stream=1', {method:'POST', headers:{'Content-Type':'application/json','X-Stream':'1'}, body: JSON.stringify({url, tests: checks, ports, scan_type: document.getElementById('nmap-scan-type').value, include_mitigation: document.getElementById('include-mitigation').checked, prefer_connect_scan: document.getElementById('prefer-connect-scan').checked, llm: document.getElementById('enable-llm').checked, llm_mode: (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured'}), signal: window.currentAbortController.signal});
-      if (!resp.body) { alert('Streaming not available; server did not return a stream.'); return; }
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder(); let buf = '';
-      while(true){ const {value, done} = await reader.read(); if (done) break; buf += decoder.decode(value, {stream:true}); let lines = buf.split(/\n/); buf = lines.pop(); for(const line of lines){ if(!line) continue; if (line === 'STREAM-START' || line === 'STREAM-END') continue; try{ const obj = JSON.parse(line);
-                if (obj.type === 'chunk'){
-                  const script = obj.script;
-                  setCardRunning(script);
-                  let el = document.querySelector(`section.script-result[data-script="${script}"]`);
-                  if (!el) { createOrUpdateEntry({script: script, stdout: '', stderr: '', findings: []}); el = document.querySelector(`section.script-result[data-script="${script}"]`); }
-                  const pre = el.querySelector('pre.stdout'); pre.textContent = (pre.textContent || '') + (obj.chunk || '');
-                  if (obj.stderr) { const errEl = el.querySelector('pre.stderr'); errEl.textContent = obj.stderr; errEl.style.display = 'block'; }
-                } else if (obj.type === 'start'){
-                  setCardRunning(obj.script);
-                  createCardProgress(obj.script, obj.timeout);
-                } else if (obj.type === 'result'){
-                  createOrUpdateEntry(obj.entry);
-                  finishCardProgress(obj.entry.script);
-                  completedScripts++;
-                  const pct = Math.round((completedScripts/totalScripts)*100);
-                  document.getElementById('global-progress-bar').style.width = pct + '%';
-                } else if (obj.type === 'summary'){
-                  const sum=document.getElementById('summary'); if(obj.summary && obj.summary.length){ const ul=document.createElement('ul'); obj.summary.forEach(s=>{const li=document.createElement('li'); li.textContent=s; ul.appendChild(li)}); sum.appendChild(ul);} else sum.textContent='No findings';
-                  if (obj.llm_ideas && obj.llm_ideas.length){ const h=document.createElement('h4'); h.textContent='LLM Ideas & Analysis'; sum.appendChild(h); const ol=document.createElement('ol'); obj.llm_ideas.forEach(i=>{ const li=document.createElement('li'); li.innerHTML = `<strong>${i.script}:</strong> ${i.analysis}`; ol.appendChild(li); }); sum.appendChild(ol); }
-                  // show aggregated raw LLM debug if present and checkbox enabled
-                  if (obj.llm_ideas && obj.llm_ideas.length && document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked) {
-                    const dbg = document.createElement('div'); dbg.style.marginTop='8px'; dbg.style.background='#fafafa'; dbg.style.padding='8px'; dbg.style.border='1px dashed #ccc'; obj.llm_ideas.forEach(i=>{ const pre=document.createElement('pre'); pre.style.whiteSpace='pre-wrap'; pre.textContent = `${i.script}: ${i.analysis}`; dbg.appendChild(pre); }); sum.appendChild(dbg);
-                  }
-                }
-            } catch(e){ console.error('parse', e, line); }
-        }}
-      document.getElementById('global-progress-bar').style.width = '100%';
-      // finalize statuses for any remaining selected
-      checks.forEach(s=>{ finishCardProgress(s); setCardStatus(s, 'Done', 'done'); });
-      // clear controller
-      window.currentAbortController = null;
-    }
-
-    async function runLevel(){
-      const url=document.getElementById('url').value; const level=document.getElementById('level').value;
-      const ports = document.getElementById('ports').value;
-      if(!url){alert('Enter a target URL'); return;}
-      // clear previous results and summary
-      document.getElementById('results').innerHTML = ''; document.getElementById('summary').innerHTML = '';
-      // mark all cards running visually (server will emit start/result for actual ones)
-      Array.from(document.querySelectorAll('#tests input')).map(i=>i.value).forEach(s=>setCardRunning(s));
-      // create per-card progress placeholders
-      Array.from(document.querySelectorAll('#tests input')).map(i=>i.value).forEach(s=>createCardProgress(s, 60));
-
-      window.currentAbortController = new AbortController();
-      const resp = await fetch('?stream=1', {method:'POST', headers:{'Content-Type':'application/json','X-Stream':'1'}, body: JSON.stringify({url, level, ports, scan_type: document.getElementById('nmap-scan-type').value, include_mitigation: document.getElementById('include-mitigation').checked, prefer_connect_scan: document.getElementById('prefer-connect-scan').checked, llm: document.getElementById('enable-llm').checked, llm_mode: (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured'}), signal: window.currentAbortController.signal});
-      if (!resp.body) { alert('Streaming not available; server did not return a stream.'); return; }
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder(); let buf = '';
-      let totalScripts = 0; let completedScripts = 0;
-      while(true){ const {value, done} = await reader.read(); if (done) break; buf += decoder.decode(value, {stream:true}); let lines = buf.split(/\n/); buf = lines.pop(); for(const line of lines){ if(!line) continue; if (line === 'STREAM-START' || line === 'STREAM-END') continue; try{ const obj = JSON.parse(line);
-                if (obj.type === 'chunk'){
-                  const script = obj.script;
-                  setCardRunning(script);
-                  let el = document.querySelector(`section.script-result[data-script="${script}"]`);
-                  if (!el) { createOrUpdateEntry({script: script, stdout: '', stderr: '', findings: []}); el = document.querySelector(`section.script-result[data-script="${script}"]`); }
-                  const pre = el.querySelector('pre.stdout'); pre.textContent = (pre.textContent || '') + (obj.chunk || '');
-                  if (obj.stderr) { const errEl = el.querySelector('pre.stderr'); errEl.textContent = obj.stderr; errEl.style.display = 'block'; }
-                } else if (obj.type === 'start'){
-                  setCardRunning(obj.script);
-                  createCardProgress(obj.script, obj.timeout);
-                  totalScripts++;
-                } else if (obj.type === 'result'){
-                  createOrUpdateEntry(obj.entry);
-                  finishCardProgress(obj.entry.script);
-                  completedScripts++;
-                  const pct = totalScripts ? Math.round((completedScripts/totalScripts)*100) : 100;
-                  document.getElementById('global-progress-bar').style.width = pct + '%';
-                } else if (obj.type === 'summary'){
-                  const sum=document.getElementById('summary'); if(obj.summary && obj.summary.length){ const ul=document.createElement('ul'); obj.summary.forEach(s=>{const li=document.createElement('li'); li.textContent=s; ul.appendChild(li)}); sum.appendChild(ul);} else sum.textContent='No findings';
-                  if (obj.llm_ideas && obj.llm_ideas.length){ const h=document.createElement('h4'); h.textContent='LLM Ideas & Analysis'; sum.appendChild(h); const ol=document.createElement('ol'); obj.llm_ideas.forEach(i=>{ const li=document.createElement('li'); li.innerHTML = `<strong>${i.script}:</strong> ${i.analysis}`; ol.appendChild(li); }); sum.appendChild(ol); }
-                }
-            } catch(e){ console.error('parse', e, line); }
-        }}
-      document.getElementById('global-progress-bar').style.width = '100%';
-      // finalize statuses for all
-      Array.from(document.querySelectorAll('#tests input')).map(i=>i.value).forEach(s=>{ finishCardProgress(s); setCardStatus(s, 'Done', 'done'); });
-      window.currentAbortController = null;
-    }
-
-    // Run all via streaming fetch; server emits JSON-per-line for each result and a summary
-    async function runAll(){
-      const url=document.getElementById('url').value; if(!url){alert('Enter a target URL'); return;}
-      document.getElementById('results').innerHTML = ''; document.getElementById('summary').innerHTML = '';
-      const r = await fetch('?action=scripts'); const data = await r.json();
-      const controller = new AbortController();
-      window.currentAbortController = controller;
-      const ports = document.getElementById('ports').value;
-      // mark all scripts running visually
-      data.scripts.forEach(s=>setCardRunning(s));
-      // setup global progress
-      let totalScripts = data.scripts.length; let completedScripts = 0;
-      document.getElementById('global-progress-bar').style.width = '5%';
-      const resp = await fetch('?stream=1', {method:'POST', headers:{'Content-Type':'application/json','X-Stream':'1'}, body: JSON.stringify({url, tests: data.scripts, ports, scan_type: document.getElementById('nmap-scan-type').value, include_mitigation: document.getElementById('include-mitigation').checked, prefer_connect_scan: document.getElementById('prefer-connect-scan').checked, llm: document.getElementById('enable-llm').checked, llm_mode: (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured'}), signal: controller.signal});
-      if (!resp.body) { alert('Streaming not available; server did not return a stream.'); return; }
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder(); let buf = '';
-      while(true){ const {value, done} = await reader.read(); if (done) break; buf += decoder.decode(value, {stream:true}); let lines = buf.split(/\n/); buf = lines.pop(); for(const line of lines){ if(!line) continue; if (line === 'STREAM-START' || line === 'STREAM-END') continue; try{ const obj = JSON.parse(line);
-              if (obj.type === 'chunk'){
-                const script = obj.script;
-                // ensure card shows running
-                setCardRunning(script);
-                let el = document.querySelector(`section.script-result[data-script="${script}"]`);
-                if (!el) { createOrUpdateEntry({script: script, stdout: '', stderr: '', findings: []}); el = document.querySelector(`section.script-result[data-script="${script}"]`); }
-                const pre = el.querySelector('pre.stdout'); pre.textContent = (pre.textContent || '') + (obj.chunk || '');
-                if (obj.stderr) { const errEl = el.querySelector('pre.stderr'); errEl.textContent = obj.stderr; errEl.style.display = 'block'; }
-            } else if (obj.type === 'start'){
-              // create per-card progress bar and mark running
-              setCardRunning(obj.script);
-              createCardProgress(obj.script, obj.timeout);
-              } else if (obj.type === 'result'){
-                createOrUpdateEntry(obj.entry);
-                // update final card status
-                const cls = (obj.entry.stderr ? 'error' : (obj.entry.findings && obj.entry.findings.length ? 'done' : 'done'));
-                setCardStatus(obj.entry.script, obj.entry.stderr ? 'Error' : 'Done', cls);
-              // finish per-card progress and update global progress
-              finishCardProgress(obj.entry.script);
-              completedScripts++;
-              const pct = Math.round((completedScripts/totalScripts)*100);
-              document.getElementById('global-progress-bar').style.width = pct + '%';
-              } else if (obj.type === 'summary'){
-                const sum=document.getElementById('summary'); if(obj.summary && obj.summary.length){ const ul=document.createElement('ul'); obj.summary.forEach(s=>{const li=document.createElement('li'); li.textContent=s; ul.appendChild(li)}); sum.appendChild(ul);} else sum.textContent='No findings';
-                if (obj.llm_ideas && obj.llm_ideas.length){ const h=document.createElement('h4'); h.textContent='LLM Ideas & Analysis'; sum.appendChild(h); const ol=document.createElement('ol'); obj.llm_ideas.forEach(i=>{ const li=document.createElement('li'); li.innerHTML = `<strong>${i.script}:</strong> ${i.analysis}`; ol.appendChild(li); }); sum.appendChild(ol); }
-              }
-          } catch(e){ console.error('parse', e, line); } }
-      }
-      document.getElementById('global-progress-bar').style.width = '100%';
-      window.currentAbortController = null;
-    }
-
-    function renderResults(data){ const sum=document.getElementById('summary'); const res=document.getElementById('results'); res.innerHTML=''; sum.innerHTML=''; if(data.summary && data.summary.length){ const ul=document.createElement('ul'); data.summary.forEach(s=>{const li=document.createElement('li'); li.textContent=s; ul.appendChild(li)}); sum.appendChild(ul);} else sum.textContent='No findings'; data.results.forEach(r=>{createOrUpdateEntry(r);}); }
-
-    document.getElementById('run-selected').addEventListener('click', runSelected);
-    document.getElementById('run-level').addEventListener('click', runLevel);
-    document.getElementById('run-all').addEventListener('click', runAll);
-    document.getElementById('stop-all').addEventListener('click', async ()=>{
-      try { await fetch('?action=stop_all', { method: 'POST' }); } catch(e){ console.error('stop request failed', e); }
-      if (window.currentAbortController) { window.currentAbortController.abort(); }
-    });
-    document.getElementById('select-all').addEventListener('click', ()=>{ document.querySelectorAll('#tests input[type=checkbox]').forEach(i=>i.checked=true); });
-    document.getElementById('clear-selection').addEventListener('click', ()=>{ document.querySelectorAll('#tests input[type=checkbox]').forEach(i=>i.checked=false); });
-    loadScripts();
+    // Configuration from PHP environment - defined globally for static/security.js
+    window.LLM_SERVER_URL = '<?php echo htmlspecialchars(getenv("LLM_SERVER_URL") ?: "http://ashy.tplinkdns.com:5005/ask"); ?>';
+    window.FOLLOWUP_SYSTEM_PROMPT = '<?php echo htmlspecialchars("You are a concise security analyst. Respond ONLY with a JSON object with keys: \"answer\" (string), \"severity\" (High|Medium|Low), and \"confidence\" (a number between 0.0 and 1.0). Do not include any other text outside the JSON."); ?>';
   </script>
-  <script>
-    // Handler for quick global LLM question (direct browser call)
-    document.getElementById('ask-llm-global').addEventListener('click', async function(){
-      const qEl = document.getElementById('llm-global-question');
-      const question = qEl.value && qEl.value.trim();
-      if (!question) { alert('Enter a question'); return; }
-      const respDivId = 'llm-global-response';
-      let respDiv = document.getElementById(respDivId);
-      if (!respDiv) { respDiv = document.createElement('div'); respDiv.id = respDivId; respDiv.style.marginTop='12px'; document.querySelector('.controls').appendChild(respDiv); }
-      respDiv.innerHTML = '<em>Asking...</em>';
-      try {
-        const prompt_text = `General security question:\n\n${question}`;
-        const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
-        const payload = { prompt: prompt_text };
-        if (mode === 'structured') payload.system_prompt = FOLLOWUP_SYSTEM_PROMPT;
-        const r = await fetch(LLM_SERVER_URL, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-        if (!r.ok) {
-          respDiv.innerHTML = `<span style="color:#a00">LLM request failed: ${r.status}</span>`;
-          return;
-        }
-        const j = await r.json();
-        let rawResp = '';
-        let display = '';
-        if (j && typeof j.response !== 'undefined') {
-          rawResp = String(j.response || '');
-          let parsed = null;
-          try { parsed = JSON.parse(rawResp); } catch (err) { parsed = null; }
-          if (parsed && typeof parsed === 'object') {
-            let parts = [];
-            if (parsed.summary) parts.push('Summary: ' + parsed.summary);
-            if (parsed.remediation) {
-              if (Array.isArray(parsed.remediation)) parts.push('Remediation: ' + parsed.remediation.join('; ')); else parts.push('Remediation: ' + parsed.remediation);
-            }
-            if (parsed.notes) parts.push('Notes: ' + parsed.notes);
-            if (parts.length) {
-              display = '<div style="white-space:pre-wrap;">' + parts.join('\n\n') + '</div>';
-            } else if (mode === 'structured') {
-              const v = validateStructured(parsed);
-              let warn = ''; if (!v.ok) { warn = `<div style="color:#a00;margin-bottom:8px">Warning: structured response missing fields: ${v.missing.join(', ')}</div>`; }
-              display = warn + '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>';
-            } else {
-              display = '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>';
-            }
-          } else {
-            display = '<pre style="white-space:pre-wrap;">' + rawResp + '</pre>';
-          }
-        } else {
-          display = '<span>No response</span>';
-        }
-        respDiv.innerHTML = '<strong>LLM answer:</strong>' + display;
-        if (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked && rawResp) {
-          const dbg = document.createElement('pre'); dbg.style.whiteSpace='pre-wrap'; dbg.textContent = rawResp; respDiv.appendChild(dbg);
-        }
-      } catch (e) {
-        respDiv.innerHTML = '<span style="color:#a00">Request failed: '+String(e)+'</span>';
-      }
-    });
-  </script>
-  <div id="results"></div>
-
-  <script src="/static/security.js"></script>
+  <script src="static/security.js"></script>
 </body>
 </html>

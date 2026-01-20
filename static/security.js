@@ -1,7 +1,6 @@
-    // LLM server URL for direct browser calls (override via env LLM_SERVER_URL)
-    const LLM_SERVER_URL = '<?php echo htmlspecialchars(getenv("LLM_SERVER_URL") ?: "http://ashy.tplinkdns.com:5005/ask"); ?>';
-    // System prompt for follow-up questions (requires structured JSON)
-    const FOLLOWUP_SYSTEM_PROMPT = '<?php echo htmlspecialchars("You are a concise security analyst. Respond ONLY with a JSON object with keys: \\"answer\\" (string), \\"severity\\" (High|Medium|Low), and \\"confidence\\" (a number between 0.0 and 1.0). Do not include any other text outside the JSON."); ?>';
+// Use global configuration if available, otherwise fall back to defaults
+    const LLM_SERVER_URL = window.LLM_SERVER_URL || 'http://ashy.tplinkdns.com:5005/ask';
+    const FOLLOWUP_SYSTEM_PROMPT = window.FOLLOWUP_SYSTEM_PROMPT || 'You are a concise security analyst. Respond ONLY with a JSON object with keys: "answer" (string), "severity" (High|Medium|Low), and "confidence" (a number between 0.0 and 1.0).';
     // Helper: validate structured response contains required fields
     function validateStructured(parsed){
       const required = ['answer','severity','confidence'];
@@ -139,9 +138,9 @@
               }
             }
             respDiv.innerHTML = '<strong>Follow-up reply:</strong>' + display;
-            // show raw debug if enabled
-            if (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked && rawResp) {
-              const dbg = document.createElement('pre'); dbg.style.whiteSpace='pre-wrap'; dbg.textContent = rawResp; respDiv.appendChild(dbg);
+            // show raw debug (attach as data-raw so global toggle can control visibility)
+            if (rawResp) {
+              const dbg = document.createElement('pre'); dbg.style.whiteSpace='pre-wrap'; dbg.textContent = rawResp; dbg.setAttribute('data-raw','1'); dbg.style.display = (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked) ? 'block' : 'none'; respDiv.appendChild(dbg);
             }
           } catch (e) {
             respDiv.innerHTML = '<span style="color:#a00">Request failed: '+String(e)+'</span>';
@@ -194,14 +193,39 @@
       if(!url){alert('Enter a target URL'); return;}
       if (!checks.length) { alert('Select at least one test'); return; }
       // clear previous results and summary
-      document.getElementById('results').innerHTML = '<em>Running...</em>'; document.getElementById('summary').innerHTML = '';
-      document.getElementById('ai-console').innerHTML = '';
+      document.getElementById('results').innerHTML = ''; document.getElementById('summary').innerHTML = '';
+      const aiConsole = document.getElementById('ai-console');
+      if (aiConsole) aiConsole.innerHTML = ''; // safe: only clear if present
 
-      const resp = await fetch('?stream=1', {method:'POST', headers:{'Content-Type':'application/json','X-Stream':'1'}, body: JSON.stringify({url, tests: checks, ports})});
+      // mark selected cards running
+      checks.forEach(s=>setCardRunning(s));
+      // setup per-card progress and global progress
+      let totalScripts = checks.length; let completedScripts = 0;
+      document.getElementById('global-progress-bar').style.width = '5%';
+
+      // create an AbortController for this run so the UI can cancel it
+      window.currentAbortController = new AbortController();
+      const resp = await fetch('?stream=1', {method:'POST', headers:{'Content-Type':'application/json','X-Stream':'1'}, body: JSON.stringify({url, tests: checks, ports, scan_type: document.getElementById('nmap-scan-type').value, include_mitigation: document.getElementById('include-mitigation').checked, prefer_connect_scan: document.getElementById('prefer-connect-scan').checked, llm: document.getElementById('enable-llm').checked, llm_mode: (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured'}), signal: window.currentAbortController.signal});
       if (!resp.body) { alert('Streaming not available; server did not return a stream.'); return; }
       const reader = resp.body.getReader();
       const decoder = new TextDecoder(); let buf = '';
-      while(true){ const {value, done} = await reader.read(); if (done) break; buf += decoder.decode(value, {stream:true}); let lines = buf.split(/\n/); buf = lines.pop(); for(const line of lines){ if(!line) continue; if (line === 'STREAM-START') { document.getElementById('results').innerHTML = ''; continue; } if (line === 'STREAM-END') continue; try{ processStreamLine(JSON.parse(line)); } catch(e){ console.error('parse', e, line); } } }
+      while(true){ const {value, done} = await reader.read(); if (done) break; buf += decoder.decode(value, {stream:true}); let lines = buf.split(/\n/); buf = lines.pop(); for(const line of lines){ if(!line) continue; if (line === 'STREAM-START') { document.getElementById('results').innerHTML = ''; continue; } if (line === 'STREAM-END') continue; try{ 
+        const obj = JSON.parse(line);
+        processStreamLine(obj);
+        if (obj.type === 'start') {
+          createCardProgress(obj.script, obj.timeout);
+        } else if (obj.type === 'result') {
+          finishCardProgress(obj.entry.script);
+          completedScripts++;
+          const pct = Math.round((completedScripts/totalScripts)*100);
+          document.getElementById('global-progress-bar').style.width = pct + '%';
+        }
+      } catch(e){ console.error('parse', e, line); } } }
+      document.getElementById('global-progress-bar').style.width = '100%';
+      // finalize statuses for any remaining selected
+      checks.forEach(s=>{ finishCardProgress(s); setCardStatus(s, 'Done', 'done'); });
+      // clear controller
+      window.currentAbortController = null;
     }
 
     async function runLevel(){
@@ -292,79 +316,153 @@
       } else if (data.type === 'summary') {
         if(data.summary && data.summary.length){ const ul=document.createElement('ul'); data.summary.forEach(s=>{const li=document.createElement('li'); li.textContent=s; ul.appendChild(li)}); sumDiv.appendChild(ul);} else sumDiv.textContent='No findings';
       } else if (data.type === 'llm_request') {
+        // ensure we have an aiConsole to display prompts/debug
+        let theConsole = aiConsole;
+        if (!theConsole) {
+          theConsole = document.getElementById('ai-console');
+          if (!theConsole) {
+            theConsole = document.createElement('div'); theConsole.id = 'ai-console'; theConsole.style.marginTop = '8px';
+            const summary = document.getElementById('summary'); if (summary && summary.parentNode) summary.parentNode.insertBefore(theConsole, summary.nextSibling); else document.body.appendChild(theConsole);
+          }
+        }
         const pre = document.createElement('pre');
         pre.textContent = `[${data.script}] PROMPT:\n${data.prompt}`;
-        aiConsole.appendChild(pre);
+        theConsole.appendChild(pre);
+      } else if (data.type === 'llm_status') {
+        // status updates: started | attempt | attempt_error
+        let theConsole = aiConsole || document.getElementById('ai-console');
+        if (!theConsole) {
+          theConsole = document.createElement('div'); theConsole.id = 'ai-console'; theConsole.style.marginTop='8px';
+          const summary = document.getElementById('summary'); if (summary && summary.parentNode) summary.parentNode.insertBefore(theConsole, summary.nextSibling); else document.body.appendChild(theConsole);
+        }
+        const statusText = `[${data.script}] LLM: ${data.status}` + (data.attempt ? ` (attempt ${data.attempt})` : '') + (data.http_code ? ` HTTP ${data.http_code}` : '') + (data.err ? ` err: ${data.err}` : '');
+        const preStatus = document.createElement('pre'); preStatus.textContent = statusText; if (data.status === 'attempt_error' || data.status === 'error') preStatus.style.color='#a00';
+        theConsole.appendChild(preStatus);
+        // update per-script LLM status badge
+        const sec = document.querySelector(`section.script-result[data-script="${data.script}"]`);
+        if (sec) {
+          let sEl = sec.querySelector('.ai-status'); if (!sEl) { sEl = document.createElement('div'); sEl.className='ai-status'; sEl.style.marginTop='6px'; sEl.style.fontSize='13px'; sec.appendChild(sEl); }
+          sEl.textContent = statusText; sEl.style.color = (data.status === 'attempt_error' || data.status === 'error') ? '#a00' : '';
+        }
+      } else if (data.type === 'llm_result') {
+        let theConsole = aiConsole || document.getElementById('ai-console');
+        if (!theConsole) { theConsole = document.createElement('div'); theConsole.id='ai-console'; theConsole.style.marginTop='8px'; const summary = document.getElementById('summary'); if (summary && summary.parentNode) summary.parentNode.insertBefore(theConsole, summary.nextSibling); else document.body.appendChild(theConsole); }
+        const sec = document.querySelector(`section.script-result[data-script="${data.script}"]`);
+        if (sec) {
+          let aiAnal = sec.querySelector('.ai-analysis'); if (!aiAnal) { aiAnal = document.createElement('div'); aiAnal.className='ai-analysis'; aiAnal.style.marginTop='8px'; aiAnal.style.background='#fff8f0'; aiAnal.style.padding='10px'; aiAnal.style.borderLeft='4px solid #ffc107'; sec.appendChild(aiAnal); }
+          aiAnal.innerHTML = '<strong>AI SECURITY ANALYSIS (live):</strong><div style="margin-top:6px;white-space:pre-wrap;">' + (data.analysis || '') + '</div>';
+          let rawEl = sec.querySelector('.ai-raw'); if (!rawEl) { rawEl = document.createElement('div'); rawEl.className='ai-raw'; rawEl.style.marginTop = '8px'; rawEl.style.background = '#f6f6f6'; rawEl.style.padding = '8px'; rawEl.style.borderLeft = '4px solid #ccc'; sec.appendChild(rawEl); }
+          rawEl.textContent = data.raw || '';
+          rawEl.style.display = (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked && rawEl.textContent) ? 'block' : 'none';
+        } else {
+          const pre = document.createElement('pre'); pre.textContent = `[${data.script}] LLM RESULT:\n${data.analysis || ''}`; theConsole.appendChild(pre);
+        }
+      } else if (data.type === 'llm_error') {
+        let theConsole = aiConsole || document.getElementById('ai-console');
+        if (!theConsole) { theConsole = document.createElement('div'); theConsole.id='ai-console'; theConsole.style.marginTop='8px'; const summary = document.getElementById('summary'); if (summary && summary.parentNode) summary.parentNode.insertBefore(theConsole, summary.nextSibling); else document.body.appendChild(theConsole); }
+        const pre = document.createElement('pre'); pre.textContent = `[${data.script}] LLM ERROR:\n${data.message || ''}`; pre.style.color = '#a00'; theConsole.appendChild(pre);
+        const sec = document.querySelector(`section.script-result[data-script="${data.script}"]`);
+        if (sec) {
+          let aiAnal = sec.querySelector('.ai-analysis'); if (!aiAnal) { aiAnal = document.createElement('div'); aiAnal.className='ai-analysis'; aiAnal.style.marginTop='8px'; aiAnal.style.background='#fff8f0'; aiAnal.style.padding='10px'; aiAnal.style.borderLeft='4px solid #ffc107'; sec.appendChild(aiAnal); }
+          aiAnal.innerHTML = '<strong style="color:#a00">LLM ERROR:</strong><div style="margin-top:6px;white-space:pre-wrap;color:#a00">' + (data.message || '') + '</div>';
+        }
       }
     }
 
     function renderResults(data){ const sum=document.getElementById('summary'); const res=document.getElementById('results'); res.innerHTML=''; sum.innerHTML=''; if(data.summary && data.summary.length){ const ul=document.createElement('ul'); data.summary.forEach(s=>{const li=document.createElement('li'); li.textContent=s; ul.appendChild(li)}); sum.appendChild(ul);} else sum.textContent='No findings'; data.results.forEach(r=>{createOrUpdateEntry(r);}); }
 
-    document.getElementById('run-selected').addEventListener('click', runSelected);
-    document.getElementById('run-level').addEventListener('click', runLevel);
-    document.getElementById('run-all').addEventListener('click', runAll);
-    document.getElementById('stop-all').addEventListener('click', async ()=>{
-      try { await fetch('?action=stop_all', { method: 'POST' }); } catch(e){ console.error('stop request failed', e); }
-      if (window.currentAbortController) { window.currentAbortController.abort(); }
-    });
-    document.getElementById('select-all').addEventListener('click', ()=>{ document.querySelectorAll('#tests input[type=checkbox]').forEach(i=>i.checked=true); });
-    document.getElementById('clear-selection').addEventListener('click', ()=>{ document.querySelectorAll('#tests input[type=checkbox]').forEach(i=>i.checked=false); });
-    loadScripts();
-  
-    // Handler for quick global LLM question (direct browser call)
-    document.getElementById('ask-llm-global').addEventListener('click', async function(){
-      const qEl = document.getElementById('llm-global-question');
-      const question = qEl.value && qEl.value.trim();
-      if (!question) { alert('Enter a question'); return; }
-      const respDivId = 'llm-global-response';
-      let respDiv = document.getElementById(respDivId);
-      if (!respDiv) { respDiv = document.createElement('div'); respDiv.id = respDivId; respDiv.style.marginTop='12px'; document.querySelector('.controls').appendChild(respDiv); }
-      respDiv.innerHTML = '<em>Asking...</em>';
-      try {
-        const prompt_text = `General security question:\n\n${question}`;
-        const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
-        const payload = { prompt: prompt_text };
-        if (mode === 'structured') payload.system_prompt = FOLLOWUP_SYSTEM_PROMPT;
-        const r = await fetch(LLM_SERVER_URL, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-        if (!r.ok) {
-          respDiv.innerHTML = `<span style="color:#a00">LLM request failed: ${r.status}</span>`;
-          return;
-        }
-        const j = await r.json();
-        let rawResp = '';
-        let display = '';
-        if (j && typeof j.response !== 'undefined') {
-          rawResp = String(j.response || '');
-          let parsed = null;
-          try { parsed = JSON.parse(rawResp); } catch (err) { parsed = null; }
-          if (parsed && typeof parsed === 'object') {
-            let parts = [];
-            if (parsed.summary) parts.push('Summary: ' + parsed.summary);
-            if (parsed.remediation) {
-              if (Array.isArray(parsed.remediation)) parts.push('Remediation: ' + parsed.remediation.join('; ')); else parts.push('Remediation: ' + parsed.remediation);
+    // Attach UI event handlers safely after DOM is ready and add LLM debug toggle
+    document.addEventListener('DOMContentLoaded', ()=>{
+      function attachSafe(id, event, handler){ const el = document.getElementById(id); if (el) el.addEventListener(event, handler); }
+      attachSafe('run-selected', 'click', runSelected);
+      attachSafe('run-level', 'click', runLevel);
+      attachSafe('run-all', 'click', runAll);
+      attachSafe('stop-all', 'click', async ()=>{ try { await fetch('?action=stop_all', { method: 'POST' }); } catch(e){ console.error('stop request failed', e); } if (window.currentAbortController) window.currentAbortController.abort(); });
+      attachSafe('select-all', 'click', ()=>{ document.querySelectorAll('#tests input[type=checkbox]').forEach(i=>i.checked=true); });
+      attachSafe('clear-selection', 'click', ()=>{ document.querySelectorAll('#tests input[type=checkbox]').forEach(i=>i.checked=false); });
+
+      // load tests into UI
+      if (typeof loadScripts === 'function') { try { loadScripts(); } catch(e){ console.error('loadScripts failed', e); } }
+
+      // global LLM question handler
+      const askBtn = document.getElementById('ask-llm-global');
+      if (askBtn) {
+        askBtn.addEventListener('click', async function(){
+          const qEl = document.getElementById('llm-global-question');
+          const question = qEl && qEl.value && qEl.value.trim();
+          if (!question) { alert('Enter a question'); return; }
+          const respDivId = 'llm-global-response';
+          let respDiv = document.getElementById(respDivId);
+          if (!respDiv) { respDiv = document.createElement('div'); respDiv.id = respDivId; respDiv.style.marginTop='12px'; const controls = document.querySelector('.controls'); if (controls) controls.appendChild(respDiv); else document.body.appendChild(respDiv); }
+          respDiv.innerHTML = '<em>Asking...</em>';
+          try {
+            const prompt_text = `General security question:\n\n${question}`;
+            const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
+            const payload = { prompt: prompt_text };
+            if (mode === 'structured') payload.system_prompt = FOLLOWUP_SYSTEM_PROMPT;
+            const r = await fetch(LLM_SERVER_URL, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+            if (!r.ok) {
+              respDiv.innerHTML = `<span style="color:#a00">LLM request failed: ${r.status}</span>`;
+              return;
             }
-            if (parsed.notes) parts.push('Notes: ' + parsed.notes);
-            if (parts.length) {
-              display = '<div style="white-space:pre-wrap;">' + parts.join('\n\n') + '</div>';
-            } else if (mode === 'structured') {
-              const v = validateStructured(parsed);
-              let warn = ''; if (!v.ok) { warn = `<div style="color:#a00;margin-bottom:8px">Warning: structured response missing fields: ${v.missing.join(', ')}</div>`; }
-              display = warn + '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>';
-            } else {
-              display = '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>';
-            }
-          } else {
-            display = '<pre style="white-space:pre-wrap;">' + rawResp + '</pre>';
+            const j = await r.json();
+            const rawResp = j && typeof j.response !== 'undefined' ? String(j.response || '') : '';
+            // reuse parsing helpers by attempting JSON parse; keep behavior compatible
+            let display = '';
+            try { const parsed = JSON.parse(rawResp); if (parsed && typeof parsed === 'object') {
+              let parts = [];
+              if (parsed.summary) parts.push('Summary: ' + parsed.summary);
+              if (parsed.remediation) parts.push('Remediation: ' + (Array.isArray(parsed.remediation) ? parsed.remediation.join('; ') : parsed.remediation));
+              if (parsed.notes) parts.push('Notes: ' + parsed.notes);
+              if (parts.length) display = '<div style="white-space:pre-wrap;">' + parts.join('\n\n') + '</div>';
+              else if (mode === 'structured') { const v = validateStructured(parsed); let warn=''; if (!v.ok) warn = `<div style=\"color:#a00;margin-bottom:8px\">Warning: structured response missing fields: ${v.missing.join(', ')}</div>`; display = warn + '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>'; }
+              else display = '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>';
+            } else { display = '<pre style="white-space:pre-wrap;">' + rawResp + '</pre>'; } } catch(e){ display = '<pre style="white-space:pre-wrap;">' + rawResp + '</pre>'; }
+
+            respDiv.innerHTML = '<strong>LLM answer:</strong>' + display;
+            if (rawResp) { const dbg = document.createElement('pre'); dbg.style.whiteSpace='pre-wrap'; dbg.textContent = rawResp; dbg.setAttribute('data-raw','1'); dbg.style.display = (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked) ? 'block' : 'none'; respDiv.appendChild(dbg); }
+          } catch (e) {
+            respDiv.innerHTML = '<span style="color:#a00">Request failed: '+String(e)+'</span>';
           }
-        } else {
-          display = '<span>No response</span>';
-        }
-        respDiv.innerHTML = '<strong>LLM answer:</strong>' + display;
-        if (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked && rawResp) {
-          const dbg = document.createElement('pre'); dbg.style.whiteSpace='pre-wrap'; dbg.textContent = rawResp; respDiv.appendChild(dbg);
-        }
-      } catch (e) {
-        respDiv.innerHTML = '<span style="color:#a00">Request failed: '+String(e)+'</span>';
+        });
       }
+
+      // toggle showing LLM raw debug across UI
+      const llmDebug = document.getElementById('show-llm-debug');
+      if (llmDebug) llmDebug.addEventListener('change', (ev)=>{
+        const show = !!ev.target.checked;
+        document.querySelectorAll('.ai-raw').forEach(r=>{ r.style.display = (show && r.textContent) ? 'block' : 'none'; });
+        // follow-up raw responses use <pre data-raw> appended to .followup-response
+        document.querySelectorAll('.followup-response pre[data-raw]').forEach(p=>{ p.style.display = show ? 'block' : 'none'; });
+      });
+
+      async function checkLLMConnection() {
+        const badge = document.getElementById('llm-status-badge');
+        const dot = badge ? badge.querySelector('.pulse-dot') : null;
+        const text = document.getElementById('llm-status-text');
+        if (text) text.textContent = 'Connecting...';
+        try {
+          const r = await fetch('?action=test_llm');
+          const j = await r.json();
+          const url_hint = j.url ? ` to ${j.url}` : '';
+          if (j.ok) {
+            if (text) text.textContent = 'Connected' + (j.url ? ` (${j.url})` : '');
+            if (dot) { dot.classList.add('online'); dot.classList.remove('offline'); }
+            if (badge) { badge.style.color = '#28a745'; badge.style.background = '#e9f7ef'; }
+          } else {
+            const err_msg = j.llm && j.llm.error ? `: ${j.llm.error}` : (j.llm && j.llm.code ? ` (HTTP ${j.llm.code})` : '');
+            if (text) text.textContent = 'Offline' + url_hint + err_msg;
+            throw new Error('Offline');
+          }
+        } catch (e) {
+          if (text && !text.textContent.includes('Offline')) {
+            text.textContent = 'Connection Error: ' + e.message;
+          }
+          if (dot) { dot.classList.remove('online'); dot.classList.add('offline'); }
+          if (badge) { badge.style.color = '#dc3545'; badge.style.background = '#fdedee'; }
+        }
+      }
+      const testBtn = document.getElementById('btn-test-llm');
+      if (testBtn) testBtn.addEventListener('click', checkLLMConnection);
+      checkLLMConnection();
     });
-  

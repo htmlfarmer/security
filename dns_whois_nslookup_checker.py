@@ -37,6 +37,8 @@ def get_dns_records(domain):
                 header = "  --- IPv6 Address (AAAA Record) ---"
             
             print(header)
+            if not answers:
+                print(f"    (No records found)")
             for rdata in answers:
                 print(f"    {rdata.to_text()}", flush=True)
         except dns.resolver.NoAnswer:
@@ -129,28 +131,28 @@ def get_whois_info(domain):
                     print(repr(w), flush=True)
                 except Exception:
                     print(str(w), flush=True)
-            return
+            # Do NOT return here, continue to field extraction attempt or just end function
+        else:
+            # Fields to attempt to print
+            attributes_to_print = [
+                'registrar', 'whois_server', 'creation_date', 'expiration_date',
+                'updated_date', 'name_servers', 'status', 'dnssec',
+                'name', 'org', 'address', 'city', 'state', 'zipcode', 'country',
+                'phone', 'emails'
+            ]
 
-        # Fields to attempt to print
-        attributes_to_print = [
-            'registrar', 'whois_server', 'creation_date', 'expiration_date',
-            'updated_date', 'name_servers', 'status', 'dnssec',
-            'name', 'org', 'address', 'city', 'state', 'zipcode', 'country',
-            'phone', 'emails'
-        ]
+            print("  --- Detailed WHOIS Information ---", flush=True)
+            found_info = False
+            for attr in attributes_to_print:
+                value = get_field(w, attr)
+                if value:
+                    found_info = True
+                    if isinstance(value, list):
+                        value = ', '.join(map(str, value))
+                    print(f"  - {attr.replace('_', ' ').title()}: {value}", flush=True)
 
-        print("  --- Detailed WHOIS Information ---", flush=True)
-        found_info = False
-        for attr in attributes_to_print:
-            value = get_field(w, attr)
-            if value:
-                found_info = True
-                if isinstance(value, list):
-                    value = ', '.join(map(str, value))
-                print(f"  - {attr.replace('_', ' ').title()}: {value}", flush=True)
-
-        if not found_info:
-            print("  - No detailed WHOIS fields could be extracted, but a basic record was found.", flush=True)
+            if not found_info:
+                print("  - No detailed WHOIS fields could be extracted, but a basic record was found.", flush=True)
 
     except Exception as e:
         print(f"  - Error retrieving WHOIS info: {e}", flush=True)
@@ -179,14 +181,18 @@ def main():
     if domain.startswith('www.'):
         domain = domain[4:]
 
+    print(f"[*] Starting security audit for domain: {domain}", flush=True)
     try:
         get_whois_info(domain)
     except Exception as e:
         print(f"[!] WHOIS step failed: {e}", flush=True)
+    
     try:
         get_dns_records(domain)
     except Exception as e:
         print(f"[!] DNS lookup step failed: {e}", flush=True)
+    
+    print(f"[*] Finished audit for {domain}", flush=True)
 
 if __name__ == "__main__":
     try:
