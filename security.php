@@ -141,6 +141,11 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
   // Debug log to server error log for troubleshooting
   error_log("LLM request for $script to $llm_url; prompt length=" . strlen($prompt));
 
+  // If streaming, send prompt to client for debug console
+  if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
+    stream_json_line(array('type' => 'llm_request', 'script' => $script, 'prompt' => $prompt));
+  }
+
   // Support configurable timeout (env LLM_TIMEOUT) and a simple retry mechanism
   $llm_timeout = intval(getenv('LLM_TIMEOUT') ?: 30);
   $max_attempts = intval(getenv('LLM_RETRIES') ?: 2);
@@ -241,15 +246,15 @@ function call_llm_direct($prompt, $system = null, $timeout = 12) {
     if ($json && isset($json['response'])) {
       $resp_text = trim($json['response']);
       $out['raw'] = $resp_text;
-      // try to parse JSON returned by assistant
-      $parsed = json_decode($resp_text, true);
-      if ($parsed && is_array($parsed)) {
-        // if assistant returned structured JSON, return it under 'response'
-        $out['response'] = $parsed;
-      } else {
-        $out['response'] = $resp_text;
-      }
+    // try to parse JSON returned by assistant
+    $parsed = json_decode($resp_text, true);
+    if ($parsed && is_array($parsed)) {
+      // if assistant returned structured JSON, return it under 'response'
+      $out['response'] = $parsed;
+    } else {
+      $out['response'] = $resp_text;
     }
+  }
   }
   return $out;
 }
@@ -409,8 +414,8 @@ if ($method === 'POST') {
         if (!function_exists('exec')) { $entry['stderr'] = 'exec() not available on this PHP build'; $results[] = $entry; if ($stream) { stream_json_line(array('type' => 'result', 'entry' => $entry)); } continue; }
         $python = 'python3';
         $conn_script = __DIR__ . DIRECTORY_SEPARATOR . 'simple_connect_scan.py';
-        $timeout = 'timeout 120s';
-        $script_timeout = 120;
+        $timeout = 'timeout 180s';
+        $script_timeout = 180;
         if ($stream) { stream_json_line(array('type' => 'start', 'script' => $t, 'timeout' => $script_timeout, 'cmd' => $cmd)); }
         $entry['cmd'] = $cmd;
         $cmd = $timeout . ' ' . escapeshellcmd($python) . ' ' . escapeshellarg($conn_script) . ' ' . escapeshellarg($host) . ' --ports ' . escapeshellarg($ports) . ' --timeout 1.5 --workers 50 2>&1';
@@ -515,8 +520,8 @@ if ($method === 'POST') {
         if (!function_exists('exec')) { $entry['stderr'] = 'exec() not available on this PHP build'; $results[] = $entry; if ($stream) { stream_json_line(array('type' => 'result', 'entry' => $entry)); } continue; }
         $python = 'python3';
         $conn_script = __DIR__ . DIRECTORY_SEPARATOR . 'simple_connect_scan.py';
-        $timeout = 'timeout 120s';
-        $script_timeout = 120;
+        $timeout = 'timeout 180s';
+        $script_timeout = 180;
         if ($stream) { stream_json_line(array('type' => 'start', 'script' => $t, 'timeout' => $script_timeout, 'cmd' => $cmd)); }
         $entry['cmd'] = $cmd;
         $cmd = $timeout . ' ' . escapeshellcmd($python) . ' ' . escapeshellarg($conn_script) . ' ' . escapeshellarg($host) . ' --ports ' . escapeshellarg($ports) . ' --timeout 1.5 --workers 50 2>&1';
@@ -1268,5 +1273,8 @@ if ($method === 'POST') {
       }
     });
   </script>
+  <div id="results"></div>
+
+  <script src="/static/security.js"></script>
 </body>
 </html>
