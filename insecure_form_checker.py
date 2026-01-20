@@ -3,12 +3,21 @@ from urllib.parse import urlparse
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 
+import os
+import tempfile
+
 def setup_driver():
     """Sets up the Selenium WebDriver."""
     options = webdriver.ChromeOptions()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    
+    # Use a temporary, writable directory for the user data cache
+    user_data_dir = os.path.join(tempfile.gettempdir(), 'selenium_cache')
+    os.makedirs(user_data_dir, exist_ok=True)
+    options.add_argument(f"--user-data-dir={user_data_dir}")
+
     # Selenium Manager will now handle the driver automatically
     return webdriver.Chrome(options=options)
 

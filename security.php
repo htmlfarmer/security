@@ -1,6 +1,15 @@
 <?php
 // security.php - serves a simple UI and runs python security scripts on the server
 header("Access-Control-Allow-Origin: *");
+set_time_limit(0); // Prevent PHP from timing out while waiting for LLM/scripts
+
+if (session_status() == PHP_SESSION_NONE) {
+    session_start();
+}
+$session_id = session_id();
+
+$stop_file = __DIR__ . '/STOP_SCAN_' . $session_id;
+$pid_file = __DIR__ . '/SCAN_PIDS_' . $session_id;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $action = isset($_GET['action']) ? $_GET['action'] : '';
@@ -107,15 +116,15 @@ function stream_json_line($obj) {
 }
 
 // Call the local LLM server to get a short analysis for a script's output.
-function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $mode = 'structured') {
+function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $mode = 'structured', $max_excerpt = 2000, $provider = 'gemini') {
   $llm_url = getenv('LLM_SERVER_URL') ?: 'http://ashy.tplinkdns.com:5005/ask';
   $prompt = "AI SECURITY ANALYSIS\nTest: $script\n";
   $prompt .= "Analyze the following raw scanner output and identify security implications.\n";
 
   if ($output) {
-    // Increase excerpt size for better LLM context (up to 4000 chars)
-    $excerpt = substr($output, 0, 4000);
-    $prompt .= "\nRaw Output Excerpt:\n" . $excerpt;
+    // Use the provided max_excerpt size
+    $excerpt = substr($output, 0, $max_excerpt);
+    $prompt .= "\nRaw Output Excerpt (" . strlen($excerpt) . " chars):\n" . $excerpt;
   }
 
   $system = 'You are an expert security analyst. Analyze the provided scanner output and respond ONLY with a valid JSON object. Do not include any other text.
@@ -126,7 +135,7 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
   "remediation": Actionable suggestions to mitigate the identified risks.';
   
   // If caller requested free-text mode, do not include a strict system prompt forcing JSON
-  $payload_array = array('prompt' => $prompt);
+  $payload_array = array('prompt' => $prompt, 'provider' => $provider);
   if ($mode === 'free-text') {
     // leave payload without system prompt so assistant may reply in free form
   } else {
@@ -140,48 +149,45 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
   // If streaming, send prompt to client for debug console and indicate LLM started
   if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
     stream_json_line(array('type' => 'llm_request', 'script' => $script, 'prompt' => $prompt));
-    // indicate the LLM invocation has started (client can show pending/attempts)
-    stream_json_line(array('type' => 'llm_status', 'script' => $script, 'status' => 'started'));
+    // indicate the LLM invocation has started (waiting indefinitely)
+    stream_json_line(array('type' => 'llm_status', 'script' => $script, 'status' => 'waiting'));
   }
 
-  // Support configurable timeout (env LLM_TIMEOUT) and a simple retry mechanism
-  $llm_timeout = intval(getenv('LLM_TIMEOUT') ?: 30);
-  $max_attempts = intval(getenv('LLM_RETRIES') ?: 2);
-  $resp = false; $err = ''; $code = 0;
-  for ($attempt = 1; $attempt <= $max_attempts; $attempt++) {
-    // announce the attempt when streaming
-    if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
-      stream_json_line(array('type' => 'llm_status', 'script' => $script, 'status' => 'attempt', 'attempt' => $attempt));
-    }
-
-    $ch = curl_init($llm_url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, array('Content-Type: application/json'));
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-    curl_setopt($ch, CURLOPT_TIMEOUT, $llm_timeout);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
-    $start = microtime(true);
-    $resp = curl_exec($ch);
-    $err = curl_error($ch);
-    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    $dur = round(microtime(true) - $start, 2);
-    error_log("LLM attempt $attempt/$max_attempts for $script: HTTP $code, err='" . $err . "', dur={$dur}s, resp_len=" . strlen($resp));
-    if (!$err && $code >= 200 && $code < 300 && $resp) break;
-    // announce attempt-level error to UI
-    if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
-      stream_json_line(array('type' => 'llm_status', 'script' => $script, 'status' => 'attempt_error', 'attempt' => $attempt, 'http_code' => $code, 'err' => $err));
-    }
-    // small backoff before retrying
-    if ($attempt < $max_attempts) { usleep(300000); }
+  // Set a generous 90-second timeout for the LLM request
+  $llm_timeout = 90;
+  $ch = curl_init($llm_url);
+  curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+  curl_setopt($ch, CURLOPT_HTTPHEADER, array('Content-Type: application/json'));
+  curl_setopt($ch, CURLOPT_POST, true);
+  curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+  curl_setopt($ch, CURLOPT_TIMEOUT, $llm_timeout); 
+  curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 30);
+  $start = microtime(true);
+  $resp = curl_exec($ch);
+  $err = curl_error($ch);
+  $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  curl_close($ch);
+  $dur = round(microtime(true) - $start, 2);
+  
+  error_log("LLM request for $script: HTTP $code, err='" . $err . "', dur={$dur}s");
+  
+  if (!$err && $code >= 200 && $code < 300 && $resp) {
+     $json = json_decode($resp, true);
+     $provider_info = isset($json['provider']) ? $json['provider'] : '';
+     if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
+       stream_json_line(array('type' => 'llm_status', 'script' => $script, 'status' => 'success', 'duration' => $dur, 'provider' => $provider_info));
+     }
+  } else {
+     if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
+       stream_json_line(array('type' => 'llm_status', 'script' => $script, 'status' => 'error', 'http_code' => $code, 'err' => $err, 'duration' => $dur));
+     }
   }
+
   $out = array('analysis' => '', 'raw' => '');
   // Surface curl/network errors into analysis so UI shows diagnostics
   if ($err) {
     $out['raw'] = '';
     $out['analysis'] = 'LLM request error: ' . $err;
-    // stream error to client when streaming
     if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
       stream_json_line(array('type' => 'llm_error', 'script' => $script, 'message' => $out['analysis']));
     }
@@ -238,9 +244,9 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
 }
 
 // Direct LLM call helper for follow-up questions. Returns array with keys: response (parsed/fallback), raw (raw assistant reply), code, error
-function call_llm_direct($prompt, $system = null, $timeout = 12) {
+function call_llm_direct($prompt, $system = null, $timeout = 12, $provider = 'gemini') {
   $llm_url = getenv('LLM_SERVER_URL') ?: 'http://ashy.tplinkdns.com:5005/ask';
-  $payload = array('prompt' => $prompt);
+  $payload = array('prompt' => $prompt, 'provider' => $provider);
   if ($system) $payload['system_prompt'] = $system;
   $payload_json = json_encode($payload);
 
@@ -263,9 +269,12 @@ function call_llm_direct($prompt, $system = null, $timeout = 12) {
     error_log("LLM direct curl error: " . $err);
   }
 
-  $out = array('response' => '', 'raw' => $resp ?: '', 'code' => $code, 'error' => $err);
+  $out = array('response' => '', 'raw' => $resp ?: '', 'code' => $code, 'error' => $err, 'provider' => '');
   if ($resp && $code >= 200 && $code < 300) {
     $json = json_decode($resp, true);
+    if ($json && isset($json['provider'])) {
+      $out['provider'] = $json['provider'];
+    }
     if ($json && isset($json['response'])) {
       $resp_text = trim($json['response']);
       $out['raw'] = $resp_text;
@@ -345,12 +354,19 @@ if ($method === 'POST' && $action === 'clear_stop') {
 // Handle LLM connection test
 if ($method === 'GET' && $action === 'test_llm') {
   $prompt = "Respond with 'Connected'";
-  $res = call_llm_direct($prompt, "You are a connectivity tester.", 5);
-  $llm_url = getenv('LLM_SERVER_URL') ?: 'http://ashy.tplinkdns.com:5005/ask';
+  $llm_url = $_GET['url'] ?? getenv('LLM_SERVER_URL') ?: 'http://ashy.tplinkdns.com:5005/ask';
+  $timeout = isset($_GET['timeout']) ? intval($_GET['timeout']) : 15;
+  $provider = $_GET['provider'] ?? 'gemini';
+  
+  // Use the override URL if provided in environment via putenv earlier or via GET
+  if (isset($_GET['url'])) { putenv("LLM_SERVER_URL=" . $_GET['url']); }
+
+  $res = call_llm_direct($prompt, "You are a connectivity tester.", $timeout, $provider);
   respond_json(array(
     'ok' => ($res['code'] >= 200 && $res['code'] < 300),
     'llm' => $res,
     'url' => $llm_url,
+    'provider' => $res['provider'] ?? '',
     'method' => 'POST'
   ));
 }
@@ -371,7 +387,8 @@ if ($method === 'POST' && $action === 'ask_llm') {
   $prompt .= "Question:\n" . $question . "\n";
 
   $system = 'You are a concise security analyst. Respond with JSON: {"answer":string, "notes": optional string}. Keep replies short.';
-  $res = call_llm_direct($prompt, $system, 20);
+  $provider = isset($body['provider']) ? $body['provider'] : 'gemini';
+  $res = call_llm_direct($prompt, $system, 20, $provider);
   // normalize response: if parsed JSON present return it, otherwise return raw text under answer
   $out = array('ok' => true, 'script' => $script, 'question' => $question, 'llm' => $res);
   // respond JSON
@@ -387,6 +404,13 @@ if ($method === 'POST') {
     $enable_llm = isset($body['llm']) ? boolval($body['llm']) : true;
     // Respect LLM response mode from client: 'structured' or 'free-text'
     $llm_mode = isset($body['llm_mode']) ? $body['llm_mode'] : 'structured';
+
+    // LLM Overrides from UI
+    if (!empty($body['llm_url'])) { putenv("LLM_SERVER_URL=" . $body['llm_url']); }
+    if (!empty($body['llm_timeout'])) { putenv("LLM_TIMEOUT=" . intval($body['llm_timeout'])); }
+    if (!empty($body['llm_retries'])) { putenv("LLM_RETRIES=" . intval($body['llm_retries'])); }
+    $llm_max_excerpt = isset($body['llm_max_excerpt']) ? intval($body['llm_max_excerpt']) : 2000;
+    $llm_provider = isset($body['llm_provider']) ? $body['llm_provider'] : 'gemini';
 
     $url = isset($body['url']) ? $body['url'] : null;
     if (!$url) { respond_json(array('error' => 'Missing url parameter')); }
@@ -451,7 +475,8 @@ if ($method === 'POST') {
         if (!$host) { $host = preg_replace('#^https?://#', '', $url); $host = preg_replace('#/.*$#', '', $host); }
         $entry['script_path'] = 'nmap';
         if (!function_exists('exec')) { $entry['stderr'] = 'exec() not available on this PHP build'; $results[] = $entry; if ($stream) { stream_json_line(array('type' => 'result', 'entry' => $entry)); } continue; }
-        $python = 'python3';
+        $python = __DIR__ . DIRECTORY_SEPARATOR . '.venv/bin/python';
+        if (!file_exists($python)) { $python = 'python3'; } // Fallback to system python3
         $conn_script = __DIR__ . DIRECTORY_SEPARATOR . 'simple_connect_scan.py';
         $timeout = 'timeout 180s';
         $script_timeout = 180;
@@ -470,33 +495,41 @@ if ($method === 'POST') {
           stream_set_blocking($pipes[1], false);
           stream_set_blocking($pipes[2], false);
           while (true) {
-            $status = proc_get_status($process);
-            $running = $status['running'];
             $read = array();
             if (!feof($pipes[1])) $read[] = $pipes[1];
             if (!feof($pipes[2])) $read[] = $pipes[2];
-            if ($read) {
-              $write = null; $except = null;
-              $n = @stream_select($read, $write, $except, 0, 200000);
-              if ($n > 0) {
-                foreach ($read as $rpipe) {
-                  $chunk = fgets($rpipe);
-                  if ($chunk !== false) {
-                    if ($rpipe === $pipes[1]) {
-                      $entry_stdout .= $chunk;
-                      if ($stream) {
-                        stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stdout' => $entry_stdout));
-                      }
-                    } else {
-                      $entry_stderr .= $chunk;
-                      if ($stream) {
-                        stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stderr' => $entry_stderr));
-                      }
+
+            if (!$read) {
+              $status = proc_get_status($process);
+              if (!$status['running']) break;
+              usleep(50000);
+              continue;
+            }
+
+            $write = null; $except = null;
+            $n = @stream_select($read, $write, $except, 0, 100000);
+            if ($n > 0) {
+              foreach ($read as $rpipe) {
+                $chunk = fread($rpipe, 8192);
+                if ($chunk !== false && strlen($chunk) > 0) {
+                  if ($rpipe === $pipes[1]) {
+                    $entry_stdout .= $chunk;
+                    if ($stream) {
+                      stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stdout' => $entry_stdout));
+                    }
+                  } else {
+                    $entry_stderr .= $chunk;
+                    if ($stream) {
+                      stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stderr' => $entry_stderr));
                     }
                   }
                 }
               }
             }
+            
+            $status = proc_get_status($process);
+            if (!$status['running'] && feof($pipes[1]) && feof($pipes[2])) break;
+
             // Check for a stop request
             if (file_exists($stop_file)) {
               @proc_terminate($process);
@@ -507,8 +540,7 @@ if ($method === 'POST') {
               $entry_stderr = $entry_stderr ?: 'Stopped by user';
               break;
             }
-            if (!$running) break;
-            usleep(100000);
+            usleep(10000);
           }
           fclose($pipes[1]); fclose($pipes[2]);
           $ret = proc_close($process);
@@ -534,7 +566,7 @@ if ($method === 'POST') {
           try {
             $reason = $level ? "Selected level: $level" : (isset($body['tests']) ? "User selected specific tests" : "Default/basic level run");
             if (!empty($include_mitigation)) { $reason .= " | Include mitigation tips: yes"; }
-            $aiobj = call_llm_php($t, $entry['findings'], $entry['findings'], $entry['stdout'], $reason, $llm_mode);
+            $aiobj = call_llm_php($t, $entry['findings'], $entry['findings'], $entry['stdout'], $reason, $llm_mode, $llm_max_excerpt, $llm_provider);
             if ($aiobj && is_array($aiobj)) {
               if (!empty($aiobj['analysis'])) { $entry['ai_analysis'] = $aiobj['analysis']; }
               if (!empty($aiobj['raw'])) { $entry['ai_raw'] = $aiobj['raw']; }
@@ -554,7 +586,8 @@ if ($method === 'POST') {
         if (!$host) { $host = preg_replace('#^https?://#', '', $url); $host = preg_replace('#/.*$#', '', $host); }
         $entry['script_path'] = 'nmap-firewall';
         if (!function_exists('exec')) { $entry['stderr'] = 'exec() not available on this PHP build'; $results[] = $entry; if ($stream) { stream_json_line(array('type' => 'result', 'entry' => $entry)); } continue; }
-        $python = 'python3';
+        $python = __DIR__ . DIRECTORY_SEPARATOR . '.venv/bin/python';
+        if (!file_exists($python)) { $python = 'python3'; } // Fallback to system python3
         $conn_script = __DIR__ . DIRECTORY_SEPARATOR . 'simple_connect_scan.py';
         $timeout = 'timeout 180s';
         $script_timeout = 180;
@@ -573,33 +606,41 @@ if ($method === 'POST') {
           stream_set_blocking($pipes[1], false);
           stream_set_blocking($pipes[2], false);
           while (true) {
-            $status = proc_get_status($process);
-            $running = $status['running'];
             $read = array();
             if (!feof($pipes[1])) $read[] = $pipes[1];
             if (!feof($pipes[2])) $read[] = $pipes[2];
-            if ($read) {
-              $write = null; $except = null;
-              $n = @stream_select($read, $write, $except, 0, 200000);
-              if ($n > 0) {
-                foreach ($read as $rpipe) {
-                  $chunk = fgets($rpipe);
-                  if ($chunk !== false) {
-                    if ($rpipe === $pipes[1]) {
-                      $entry_stdout .= $chunk;
-                      if ($stream) {
-                        stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stdout' => $entry_stdout));
-                      }
-                    } else {
-                      $entry_stderr .= $chunk;
-                      if ($stream) {
-                        stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stderr' => $entry_stderr));
-                      }
+
+            if (!$read) {
+              $status = proc_get_status($process);
+              if (!$status['running']) break;
+              usleep(50000);
+              continue;
+            }
+
+            $write = null; $except = null;
+            $n = @stream_select($read, $write, $except, 0, 100000);
+            if ($n > 0) {
+              foreach ($read as $rpipe) {
+                $chunk = fread($rpipe, 8192);
+                if ($chunk !== false && strlen($chunk) > 0) {
+                  if ($rpipe === $pipes[1]) {
+                    $entry_stdout .= $chunk;
+                    if ($stream) {
+                      stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stdout' => $entry_stdout));
+                    }
+                  } else {
+                    $entry_stderr .= $chunk;
+                    if ($stream) {
+                      stream_json_line(array('type' => 'chunk', 'script' => $t, 'chunk' => $chunk, 'stderr' => $entry_stderr));
                     }
                   }
                 }
               }
             }
+
+            $status = proc_get_status($process);
+            if (!$status['running'] && feof($pipes[1]) && feof($pipes[2])) break;
+
             if (file_exists($stop_file)) {
               @proc_terminate($process);
               if (!empty($ppid)) {
@@ -609,8 +650,7 @@ if ($method === 'POST') {
               $entry_stderr = $entry_stderr ?: 'Stopped by user';
               break;
             }
-            if (!$running) break;
-            usleep(100000);
+            usleep(10000);
           }
           fclose($pipes[1]); fclose($pipes[2]);
           $ret = proc_close($process);
@@ -637,7 +677,7 @@ if ($method === 'POST') {
           try {
             $reason = $level ? "Selected level: $level" : (isset($body['tests']) ? "User selected specific tests" : "Default/basic level run");
             if (!empty($include_mitigation)) { $reason .= " | Include mitigation tips: yes"; }
-            $aiobj = call_llm_php($t, $entry['findings'], $entry['findings'], $entry['stdout'], $reason, $llm_mode);
+            $aiobj = call_llm_php($t, $entry['findings'], $entry['findings'], $entry['stdout'], $reason, $llm_mode, $llm_max_excerpt, $llm_provider);
             if ($aiobj && is_array($aiobj)) {
               if (!empty($aiobj['analysis'])) { $entry['ai_analysis'] = $aiobj['analysis']; }
               if (!empty($aiobj['raw'])) { $entry['ai_raw'] = $aiobj['raw']; }
@@ -657,7 +697,8 @@ if ($method === 'POST') {
       if (!file_exists($script_path)) { $entry['stderr'] = "Script not found: $script_path"; $results[] = $entry; if ($stream) { stream_json_line(array('type' => 'result', 'entry' => $entry)); } continue; }
 
       // Build command. Use `timeout` to prevent long-running scripts (Linux utility)
-      $python = 'python3';
+      $python = __DIR__ . DIRECTORY_SEPARATOR . '.venv/bin/python';
+      if (!file_exists($python)) { $python = 'python3'; } // Fallback to system python3
       $timeout = 'timeout 60s';
       $script_timeout = 60;
       if ($t === 'dns' || $t === 'dns-whois' || $t === 'dns_whois_nslookup') { $timeout = 'timeout 120s'; $script_timeout = 120; }
@@ -765,7 +806,7 @@ if ($method === 'POST') {
         try {
             // Provide a reason string so the LLM knows why this test was run
             $reason = $level ? "Selected level: $level" : (isset($body['tests']) ? "User selected specific tests" : "Default/basic level run");
-            $aiobj = call_llm_php($t, $entry['findings'], $entry['findings'], $entry['stdout'], $reason, $llm_mode);
+            $aiobj = call_llm_php($t, $entry['findings'], $entry['findings'], $entry['stdout'], $reason, $llm_mode, $llm_max_excerpt, $llm_provider);
             if ($aiobj && is_array($aiobj)) {
               if (!empty($aiobj['analysis'])) { $entry['ai_analysis'] = $aiobj['analysis']; }
               if (!empty($aiobj['raw'])) { $entry['ai_raw'] = $aiobj['raw']; }
@@ -873,6 +914,30 @@ if ($method === 'POST') {
     <button id="clear-selection" class="btn ghost" title="Clear selection">Clear</button>
     <label style="margin-left:12px"><input type="checkbox" id="enable-llm" checked> Enable LLM analysis</label>
     <label style="margin-left:12px"><input type="checkbox" id="show-llm-debug"> Show LLM debug</label>
+    
+    <!-- LLM Advanced Settings -->
+    <details style="margin-left:12px; cursor:pointer;">
+      <summary style="font-size:12px; color:var(--accent);">LLM Advanced Settings</summary>
+      <div style="background:#f9f9f9; padding:10px; border-radius:8px; border:1px solid #ddd; margin-top:5px; display:flex; flex-direction:column; gap:8px;">
+        <label>LLM URL: <input id="llm-url-override" type="text" style="width:350px" value="<?php echo htmlspecialchars(getenv("LLM_SERVER_URL") ?: "http://ashy.tplinkdns.com:5005/ask"); ?>"></label>
+        <div style="display:flex; gap:15px;">
+           <label>Provider: 
+             <select id="llm-provider" style="width:120px">
+               <option value="gemini" selected>Gemini 2.5</option>
+               <option value="local">Local Model</option>
+             </select>
+           </label>
+           <label>Max Excerpt: 
+             <select id="llm-max-excerpt" style="width:80px">
+               <option value="1000">1000 chars</option>
+               <option value="2000" selected>2000 chars</option>
+               <option value="4000">4000 chars</option>
+             </select>
+           </label>
+        </div>
+      </div>
+    </details>
+
     <label style="margin-left:12px">LLM response mode:
       <select id="llm-response-mode"><option value="structured">Structured JSON (answer,severity,confidence)</option><option value="free-text">Free text</option></select>
     </label>

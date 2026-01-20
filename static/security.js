@@ -97,7 +97,8 @@
             const prompt_text = `Follow-up question about script: ${entry.script}\nContext:\n${(entry.ai_raw || entry.stdout || '').slice(0,2000)}\n\nQuestion:\n${q}`;
             // Respect response mode: structured vs free-text
             const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
-            const payload = { prompt: prompt_text };
+            const provider = document.getElementById('llm-provider')?.value || 'gemini';
+            const payload = { prompt: prompt_text, provider: provider };
             if (mode === 'structured') payload.system_prompt = FOLLOWUP_SYSTEM_PROMPT;
             const r = await fetch(LLM_SERVER_URL, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
             const j = await r.json();
@@ -187,11 +188,16 @@
     }
 
     async function runSelected(){
-      const url=document.getElementById('url').value;
-      const checks=Array.from(document.querySelectorAll('#tests input:checked')).map(i=>i.value);
+      const url = document.getElementById('url').value;
+      const checks = Array.from(document.querySelectorAll('#tests input:checked')).map(i=>i.value);
       const ports = document.getElementById('ports').value;
       if(!url){alert('Enter a target URL'); return;}
       if (!checks.length) { alert('Select at least one test'); return; }
+      
+      const llm_url_ovr = document.getElementById('llm-url-override')?.value;
+      const llm_timeout_ovr = document.getElementById('llm-timeout-override')?.value;
+      const llm_retries_ovr = document.getElementById('llm-retries-override')?.value;
+
       // clear previous results and summary
       document.getElementById('results').innerHTML = ''; document.getElementById('summary').innerHTML = '';
       const aiConsole = document.getElementById('ai-console');
@@ -205,7 +211,20 @@
 
       // create an AbortController for this run so the UI can cancel it
       window.currentAbortController = new AbortController();
-      const resp = await fetch('?stream=1', {method:'POST', headers:{'Content-Type':'application/json','X-Stream':'1'}, body: JSON.stringify({url, tests: checks, ports, scan_type: document.getElementById('nmap-scan-type').value, include_mitigation: document.getElementById('include-mitigation').checked, prefer_connect_scan: document.getElementById('prefer-connect-scan').checked, llm: document.getElementById('enable-llm').checked, llm_mode: (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured'}), signal: window.currentAbortController.signal});
+      const resp = await fetch('?stream=1', {method:'POST', headers:{'Content-Type':'application/json','X-Stream':'1'}, body: JSON.stringify({
+        url, 
+        tests: checks, 
+        ports, 
+        scan_type: document.getElementById('nmap-scan-type').value, 
+        include_mitigation: document.getElementById('include-mitigation').checked, 
+        prefer_connect_scan: document.getElementById('prefer-connect-scan').checked, 
+        llm: document.getElementById('enable-llm').checked, 
+        llm_mode: (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured',
+        llm_url: llm_url_ovr,
+        llm_timeout: llm_timeout_ovr,
+        llm_retries: llm_retries_ovr,
+        llm_max_excerpt: document.getElementById('llm-max-excerpt')?.value
+      }), signal: window.currentAbortController.signal});
       if (!resp.body) { alert('Streaming not available; server did not return a stream.'); return; }
       const reader = resp.body.getReader();
       const decoder = new TextDecoder(); let buf = '';
@@ -240,7 +259,21 @@
       Array.from(document.querySelectorAll('#tests input')).map(i=>i.value).forEach(s=>createCardProgress(s, 60));
 
       window.currentAbortController = new AbortController();
-      const resp = await fetch('?stream=1', {method:'POST', headers:{'Content-Type':'application/json','X-Stream':'1'}, body: JSON.stringify({url, level, ports, scan_type: document.getElementById('nmap-scan-type').value, include_mitigation: document.getElementById('include-mitigation').checked, prefer_connect_scan: document.getElementById('prefer-connect-scan').checked, llm: document.getElementById('enable-llm').checked, llm_mode: (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured'}), signal: window.currentAbortController.signal});
+      const resp = await fetch('?stream=1', {method:'POST', headers:{'Content-Type':'application/json','X-Stream':'1'}, body: JSON.stringify({
+        url, 
+        level, 
+        ports, 
+        scan_type: document.getElementById('nmap-scan-type').value, 
+        include_mitigation: document.getElementById('include-mitigation').checked, 
+        prefer_connect_scan: document.getElementById('prefer-connect-scan').checked, 
+        llm: document.getElementById('enable-llm').checked, 
+        llm_mode: (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured',
+        llm_provider: document.getElementById('llm-provider')?.value || 'gemini',
+        llm_url: llm_url_ovr,
+        llm_timeout: llm_timeout_ovr,
+        llm_retries: llm_retries_ovr,
+        llm_max_excerpt: document.getElementById('llm-max-excerpt')?.value
+      }), signal: window.currentAbortController.signal});
       if (!resp.body) { alert('Streaming not available; server did not return a stream.'); return; }
       const reader = resp.body.getReader();
       const decoder = new TextDecoder(); let buf = '';
@@ -329,20 +362,31 @@
         pre.textContent = `[${data.script}] PROMPT:\n${data.prompt}`;
         theConsole.appendChild(pre);
       } else if (data.type === 'llm_status') {
-        // status updates: started | attempt | attempt_error
+        // status updates: waiting | success | error
         let theConsole = aiConsole || document.getElementById('ai-console');
         if (!theConsole) {
           theConsole = document.createElement('div'); theConsole.id = 'ai-console'; theConsole.style.marginTop='8px';
           const summary = document.getElementById('summary'); if (summary && summary.parentNode) summary.parentNode.insertBefore(theConsole, summary.nextSibling); else document.body.appendChild(theConsole);
         }
-        const statusText = `[${data.script}] LLM: ${data.status}` + (data.attempt ? ` (attempt ${data.attempt})` : '') + (data.http_code ? ` HTTP ${data.http_code}` : '') + (data.err ? ` err: ${data.err}` : '');
-        const preStatus = document.createElement('pre'); preStatus.textContent = statusText; if (data.status === 'attempt_error' || data.status === 'error') preStatus.style.color='#a00';
+        let statusText = `[${data.script}] LLM: ${data.status}`;
+        if (data.status === 'waiting') statusText = `[${data.script}] LLM: Waiting for AI reply (up to 90s)...`;
+        if (data.provider) statusText += ` [${data.provider}]`;
+        if (data.duration) statusText += ` in ${data.duration}s`;
+        if (data.http_code) statusText += ` HTTP ${data.http_code}`;
+        if (data.err) statusText += ` err: ${data.err}`;
+        
+        const preStatus = document.createElement('pre'); preStatus.textContent = statusText; 
+        if (data.status === 'error') preStatus.style.color='#a00';
+        else if (data.status === 'success') preStatus.style.color='#28a745';
+        else preStatus.style.color='#0056b3';
         theConsole.appendChild(preStatus);
+        
         // update per-script LLM status badge
         const sec = document.querySelector(`section.script-result[data-script="${data.script}"]`);
         if (sec) {
           let sEl = sec.querySelector('.ai-status'); if (!sEl) { sEl = document.createElement('div'); sEl.className='ai-status'; sEl.style.marginTop='6px'; sEl.style.fontSize='13px'; sec.appendChild(sEl); }
-          sEl.textContent = statusText; sEl.style.color = (data.status === 'attempt_error' || data.status === 'error') ? '#a00' : '';
+          sEl.textContent = statusText; 
+          sEl.style.color = (data.status === 'error') ? '#a00' : (data.status === 'success' ? '#28a745' : '#0056b3');
         }
       } else if (data.type === 'llm_result') {
         let theConsole = aiConsole || document.getElementById('ai-console');
@@ -398,7 +442,8 @@
           try {
             const prompt_text = `General security question:\n\n${question}`;
             const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
-            const payload = { prompt: prompt_text };
+            const provider = document.getElementById('llm-provider')?.value || 'gemini';
+            const payload = { prompt: prompt_text, provider: provider };
             if (mode === 'structured') payload.system_prompt = FOLLOWUP_SYSTEM_PROMPT;
             const r = await fetch(LLM_SERVER_URL, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
             if (!r.ok) {
@@ -441,12 +486,23 @@
         const dot = badge ? badge.querySelector('.pulse-dot') : null;
         const text = document.getElementById('llm-status-text');
         if (text) text.textContent = 'Connecting...';
+        
+        const url_ovr = document.getElementById('llm-url-override')?.value || '';
+        const timeout_ovr = document.getElementById('llm-timeout-override')?.value || '15';
+        const provider_ovr = document.getElementById('llm-provider')?.value || 'gemini';
+        
         try {
-          const r = await fetch('?action=test_llm');
+          const query = new URLSearchParams({ action: 'test_llm' });
+          if (url_ovr) query.append('url', url_ovr);
+          query.append('timeout', timeout_ovr);
+          query.append('provider', provider_ovr);
+          
+          const r = await fetch('?' + query.toString());
           const j = await r.json();
           const url_hint = j.url ? ` to ${j.url}` : '';
+          const provider_hint = j.provider ? ` [${j.provider}]` : '';
           if (j.ok) {
-            if (text) text.textContent = 'Connected' + (j.url ? ` (${j.url})` : '');
+            if (text) text.textContent = 'Connected' + provider_hint + (j.url ? ` (${j.url})` : '');
             if (dot) { dot.classList.add('online'); dot.classList.remove('offline'); }
             if (badge) { badge.style.color = '#28a745'; badge.style.background = '#e9f7ef'; }
           } else {

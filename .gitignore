@@ -10,3 +10,47 @@ config.yaml
 # Ignore Python cache files
 __pycache__/
 *.pyc
+outputs/
+
+# Ignore Python type stubs
+*.pyi
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE/editor configs
+.vscode/
+.idea/
+*.iml
+
+# Test/coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Mypy/pylint caches
+.mypy_cache/
+.pylint.d/
+
+# Build artifacts
+build/
+dist/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+
+# Logs and databases
+*.log
+*.sqlite3
+*.db
+
+# Misc
+.DS_Store
+Thumbs.db
+.cache/
+.env
+.env.local
