@@ -23,7 +23,7 @@
         _autoAsked.add(script);
 
         const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
-        const provider = document.getElementById('llm-provider')?.value || 'gemini';
+      const provider = document.getElementById('llm-provider')?.value || '';
         const contextText = (entry.ai_raw || entry.ai_analysis || entry.stdout || '').slice(0,2000);
         const prompt = `Analyze the results of the security test "${script}". Provide a concise JSON object with keys: \"summary\" (string), \"remediation\" (array of strings), and \"notes\" (string). Context:\n${contextText}`;
 
@@ -123,7 +123,7 @@
     // Send follow-up question using shared LLM call logic and attach reply to UI and per-script card
     async function sendFollowupQuestion(script, question, respContainer) {
       const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
-      const provider = document.getElementById('llm-provider')?.value || 'gemini';
+const provider = document.getElementById('llm-provider')?.value || '';
       // Grab context from the per-script card if available
       const secCard = document.querySelector(`section.script-result[data-script="${script}"]`);
       const contextText = secCard ? ((secCard.querySelector('.ai-raw')?.textContent || secCard.querySelector('pre.stdout')?.textContent || '')).slice(0,2000) : '';
@@ -278,7 +278,7 @@
             // Build a prompt including context and the user's question
             // Respect response mode: structured vs free-text
             const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
-            const provider = document.getElementById('llm-provider')?.value || 'gemini';
+            const provider = document.getElementById('llm-provider')?.value || '';
             // Send the previous assistant reply as conversation context for better follow-ups
             const contextText = (entry.ai_raw || entry.ai_analysis || entry.stdout || '').slice(0,2000);
             const payload = { prompt: q, provider: provider, conversation: [{ role: 'assistant', content: contextText }] };
@@ -453,7 +453,7 @@
         prefer_connect_scan: document.getElementById('prefer-connect-scan').checked, 
         llm: document.getElementById('enable-llm').checked, 
         llm_mode: (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured',
-        llm_provider: document.getElementById('llm-provider')?.value || 'gemini',
+        llm_provider: document.getElementById('llm-provider')?.value || '',
         llm_url: llm_url_ovr,
         llm_timeout: llm_timeout_ovr,
         llm_retries: llm_retries_ovr,
@@ -652,7 +652,7 @@
           respDiv.innerHTML = '<em>Asking...</em>';
           try {
             const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
-            const provider = document.getElementById('llm-provider')?.value || 'gemini';
+            const provider = document.getElementById('llm-provider')?.value || '';
             // Use summary text as assistant context when asking a global follow-up
             const summaryText = (document.getElementById('summary') && document.getElementById('summary').innerText) ? document.getElementById('summary').innerText.slice(0,2000) : '';
             const payload = { prompt: question, provider: provider, conversation: [{ role: 'assistant', content: summaryText }] };
@@ -701,7 +701,7 @@
         
         const url_ovr = document.getElementById('llm-url-override')?.value || '';
         const timeout_ovr = document.getElementById('llm-timeout-override')?.value || '15';
-        const provider_ovr = document.getElementById('llm-provider')?.value || 'gemini';
+        const provider_ovr = document.getElementById('llm-provider')?.value || '';
         
         try {
           const query = new URLSearchParams({ action: 'test_llm' });

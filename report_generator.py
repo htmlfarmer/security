@@ -21,7 +21,10 @@ def query_llm(prompt: str, system_prompt: str = None, timeout: int = None) -> st
     """Query the local LLM server (/ask) and return the assistant response text.
     Returns empty string on error or timeout.
     """
-    payload = {'prompt': prompt, 'provider': 'gemini'}
+    provider = os.environ.get('LLM_PROVIDER', '')
+    payload = {'prompt': prompt}
+    if provider:
+        payload['provider'] = provider
     if system_prompt:
         payload['system_prompt'] = system_prompt
 

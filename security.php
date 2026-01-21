@@ -117,10 +117,15 @@ function stream_json_line($obj) {
 }
 
 // Call the local LLM server to get a short analysis for a script's output.
-function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $mode = 'structured', $max_excerpt = 2000, $provider = 'gemini') {
+function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $mode = 'structured', $max_excerpt = 2000, $provider = '') {
   $llm_url = getenv('LLM_SERVER_URL') ?: 'http://ashy.tplinkdns.com:5005/ask';
   $prompt = "AI SECURITY ANALYSIS\nTest: $script\n";
   $prompt .= "Analyze the following raw scanner output and identify security implications.\n";
+
+  // Use env override for provider if not provided; omit provider from payload if empty
+  if (!$provider) { $provider = getenv('LLM_PROVIDER') ?: ''; }
+  $payload_array = array('prompt' => $prompt);
+  if ($provider) { $payload_array['provider'] = $provider; }
 
   if ($output) {
     // Use the provided max_excerpt size
@@ -246,9 +251,11 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
 }
 
 // Direct LLM call helper for follow-up questions. Returns array with keys: response (parsed/fallback), raw (raw assistant reply), code, error
-function call_llm_direct($prompt, $system = null, $timeout = 12, $provider = 'gemini') {
+function call_llm_direct($prompt, $system = null, $timeout = 12, $provider = '') {
   $llm_url = getenv('LLM_SERVER_URL') ?: 'http://ashy.tplinkdns.com:5005/ask';
-  $payload = array('prompt' => $prompt, 'provider' => $provider);
+  if (!$provider) { $provider = getenv('LLM_PROVIDER') ?: ''; }
+  $payload = array('prompt' => $prompt);
+  if ($provider) $payload['provider'] = $provider;
   if ($system) $payload['system_prompt'] = $system;
   $payload_json = json_encode($payload);
 
@@ -357,7 +364,7 @@ if ($method === 'GET' && $action === 'test_llm') {
   $prompt = "Respond with 'Connected'";
   $llm_url = $_GET['url'] ?? getenv('LLM_SERVER_URL') ?: 'http://ashy.tplinkdns.com:5005/ask';
   $timeout = isset($_GET['timeout']) ? intval($_GET['timeout']) : 15;
-  $provider = $_GET['provider'] ?? 'gemini';
+  $provider = $_GET['provider'] ?? (getenv('LLM_PROVIDER') ?: '');
   
   // Use the override URL if provided in environment via putenv earlier or via GET
   if (isset($_GET['url'])) { putenv("LLM_SERVER_URL=" . $_GET['url']); }
@@ -410,7 +417,7 @@ if ($method === 'POST' && $action === 'ask_llm') {
   $prompt .= "Question:\n" . $question . "\n";
 
   $system = 'You are a concise security analyst. Respond with JSON: {"answer":string, "notes": optional string}. Keep replies short.';
-  $provider = isset($body['provider']) ? $body['provider'] : 'gemini';
+  $provider = isset($body['provider']) ? $body['provider'] : (getenv('LLM_PROVIDER') ?: '');
   $res = call_llm_direct($prompt, $system, 20, $provider);
 
   // Persist follow-up to outputs for inclusion in reports
@@ -476,7 +483,7 @@ if ($method === 'POST') {
     if (!empty($body['llm_timeout'])) { putenv("LLM_TIMEOUT=" . intval($body['llm_timeout'])); }
     if (!empty($body['llm_retries'])) { putenv("LLM_RETRIES=" . intval($body['llm_retries'])); }
     $llm_max_excerpt = isset($body['llm_max_excerpt']) ? intval($body['llm_max_excerpt']) : 2000;
-    $llm_provider = isset($body['llm_provider']) ? $body['llm_provider'] : 'gemini';
+    $llm_provider = isset($body['llm_provider']) ? $body['llm_provider'] : (getenv('LLM_PROVIDER') ?: '');
 
     $url = isset($body['url']) ? $body['url'] : null;
     if (!$url) { respond_json(array('error' => 'Missing url parameter')); }
@@ -987,10 +994,12 @@ if ($method === 'POST') {
       <div style="background:#f9f9f9; padding:10px; border-radius:8px; border:1px solid #ddd; margin-top:5px; display:flex; flex-direction:column; gap:8px;">
         <label>LLM URL: <input id="llm-url-override" type="text" style="width:350px" value="<?php echo htmlspecialchars(getenv("LLM_SERVER_URL") ?: "http://ashy.tplinkdns.com:5005/ask"); ?>"></label>
         <div style="display:flex; gap:15px;">
+           <?php $default_provider = getenv('LLM_PROVIDER') ?: ''; ?>
            <label>Provider: 
-             <select id="llm-provider" style="width:120px">
-               <option value="gemini" selected>Gemini 2.5</option>
-               <option value="local">Local Model</option>
+             <select id="llm-provider" style="width:140px">
+               <option value="" <?php if ($default_provider === '') echo 'selected'; ?>>Auto (server default)</option>
+               <option value="gemini" <?php if ($default_provider === 'gemini') echo 'selected'; ?>>Gemini 2.5</option>
+               <option value="local" <?php if ($default_provider === 'local') echo 'selected'; ?>>Local Model</option>
              </select>
            </label>
            <label>Max Excerpt: 
