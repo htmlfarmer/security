@@ -8,8 +8,9 @@ if (session_status() == PHP_SESSION_NONE) {
 }
 $session_id = session_id();
 
-$stop_file = __DIR__ . '/STOP_SCAN_' . $session_id;
-$pid_file = __DIR__ . '/SCAN_PIDS_' . $session_id;
+// Use session-specific temp files to isolate concurrent scans across users.
+$stop_file = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'security_stop_' . $session_id;
+$pid_file = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'security_pids_' . $session_id;
 
 $method = $_SERVER['REQUEST_METHOD'];
 $action = isset($_GET['action']) ? $_GET['action'] : '';
@@ -132,7 +133,8 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
   "summary": A concise overview of the results (2-3 sentences).
   "reason": Describe what you think the technical purpose or reason for running this specific test is, based on the output.
   "findings": A list or summary of specific vulnerabilities or security concerns you identified.
-  "remediation": Actionable suggestions to mitigate the identified risks.';
+  "remediation": Actionable suggestions to mitigate the identified risks.
+  "examples": Provide one or more examples of how to solve the identified vulnerabilities or security concerns.';
   
   // If caller requested free-text mode, do not include a strict system prompt forcing JSON
   $payload_array = array('prompt' => $prompt, 'provider' => $provider);
@@ -297,8 +299,8 @@ if ($method === 'GET' && $action === 'scripts') {
 }
 
 // Stop control endpoints (create/clear a stop-flag file)
-$stop_file = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'security_stop';
-$pid_file = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'security_pids';
+// Session-specific files are used (see top of file)
+// $stop_file and $pid_file are already defined per-session.
 // helper: add pid to pid file
 function add_pid_to_file($pid_file, $pid) {
   if (!$pid) return;
@@ -313,7 +315,7 @@ function remove_pid_from_file($pid_file, $pid) {
 }
 if ($method === 'POST' && $action === 'stop_all') {
   @file_put_contents($stop_file, "1");
-  // attempt to kill any tracked pids
+  // attempt to kill any tracked pids for this session
   if (file_exists($pid_file)) {
     $pids = file($pid_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     if ($pids) {
@@ -338,12 +340,11 @@ if ($method === 'POST' && $action === 'stop_all') {
         }
         @exec("kill -KILL $pid 2>/dev/null");
         @exec("kill -KILL -$pid 2>/dev/null");
-        @exec("pkill -9 -P $pid 2>/dev/null");
       }
     }
     @unlink($pid_file);
   }
-  respond_json(array('ok' => true, 'msg' => 'stop requested'));
+  respond_json(array('ok' => true, 'message' => 'Stop signal sent for session ' . $session_id));
 }
 if ($method === 'POST' && $action === 'clear_stop') {
   if (file_exists($stop_file)) { @unlink($stop_file); }
@@ -371,6 +372,27 @@ if ($method === 'GET' && $action === 'test_llm') {
   ));
 }
 
+// Return saved follow-ups for a given target (and optional script filter)
+if ($method === 'GET' && $action === 'get_followups') {
+  $target = $_GET['target'] ?? '';
+  $script_filter = $_GET['script'] ?? '';
+  if (!$target) { respond_json(array('error' => 'Missing target')); }
+  $p = parse_url($target);
+  $hostpart = $p && isset($p['host']) ? $p['host'] : preg_replace('/[^A-Za-z0-9_\-]/', '_', $target);
+  $basename = preg_replace('/[^A-Za-z0-9_\-\.]/', '_', $hostpart);
+  $outdir = __DIR__ . DIRECTORY_SEPARATOR . 'outputs';
+  $file = $outdir . DIRECTORY_SEPARATOR . 'followups_' . $basename . '.json';
+  if (!file_exists($file)) { respond_json(array('followups' => array())); }
+  $txt = @file_get_contents($file);
+  $arr = $txt ? json_decode($txt, true) : array();
+  if (!is_array($arr)) $arr = array();
+  if ($script_filter) {
+    $arr = array_filter($arr, function($v) use ($script_filter) { return isset($v['script']) && $v['script'] === $script_filter; });
+    $arr = array_values($arr);
+  }
+  respond_json(array('followups' => $arr));
+}
+
 // Handle follow-up LLM ask requests from the UI
 if ($method === 'POST' && $action === 'ask_llm') {
   $body = json_decode(file_get_contents('php://input'), true);
@@ -378,6 +400,7 @@ if ($method === 'POST' && $action === 'ask_llm') {
   $script = isset($body['script']) ? $body['script'] : 'unknown';
   $question = isset($body['question']) ? $body['question'] : '';
   $context = isset($body['context']) ? $body['context'] : '';
+  $target = isset($body['target']) ? $body['target'] : '';
   if (!$question) { respond_json(array('error' => 'Missing question')); }
 
   $prompt = "Follow-up question about script: $script\n";
@@ -389,8 +412,51 @@ if ($method === 'POST' && $action === 'ask_llm') {
   $system = 'You are a concise security analyst. Respond with JSON: {"answer":string, "notes": optional string}. Keep replies short.';
   $provider = isset($body['provider']) ? $body['provider'] : 'gemini';
   $res = call_llm_direct($prompt, $system, 20, $provider);
+
+  // Persist follow-up to outputs for inclusion in reports
+  try {
+    $outdir = __DIR__ . DIRECTORY_SEPARATOR . 'outputs';
+    if (!file_exists($outdir)) { @mkdir($outdir, 0755, true); }
+    // Determine a safe basename from target if provided, otherwise use session id
+    $basename = 'unknown';
+    if ($target) {
+      $p = parse_url($target);
+      $hostpart = $p && isset($p['host']) ? $p['host'] : preg_replace('/[^A-Za-z0-9_\-]/', '_', $target);
+      $basename = preg_replace('/[^A-Za-z0-9_\-\.]/', '_', $hostpart);
+    } else {
+      $basename = $session_id;
+    }
+    $file = $outdir . DIRECTORY_SEPARATOR . 'followups_' . $basename . '.json';
+    $existing = array();
+    if (file_exists($file)) {
+      $txt = @file_get_contents($file);
+      $existing = $txt ? json_decode($txt, true) : array();
+      if (!is_array($existing)) $existing = array();
+    }
+    $entry = array(
+      'timestamp' => time(),
+      'script' => $script,
+      'question' => $question,
+      'context' => substr($context,0,2000),
+      'provider' => $provider,
+      'response_raw' => isset($res['raw']) ? $res['raw'] : (is_string($res['response']) ? $res['response'] : ''),
+      'response_parsed' => null,
+      'http_code' => isset($res['code']) ? $res['code'] : null,
+      'error' => isset($res['error']) ? $res['error'] : ''
+    );
+    // attempt to json_decode assistant reply into response_parsed
+    if (isset($entry['response_raw'])) {
+      $parsed = json_decode($entry['response_raw'], true);
+      if ($parsed) $entry['response_parsed'] = $parsed;
+    }
+    $existing[] = $entry;
+    @file_put_contents($file, json_encode($existing, JSON_PRETTY_PRINT), LOCK_EX);
+  } catch (Exception $e) {
+    error_log('Could not persist followup: ' . $e->getMessage());
+  }
+
   // normalize response: if parsed JSON present return it, otherwise return raw text under answer
-  $out = array('ok' => true, 'script' => $script, 'question' => $question, 'llm' => $res);
+  $out = array('ok' => true, 'script' => $script, 'question' => $question, 'llm' => $res, 'saved_to' => isset($file) ? $file : null);
   // respond JSON
   header('Content-Type: application/json'); echo json_encode($out); exit;
 }
@@ -881,7 +947,7 @@ if ($method === 'POST') {
     @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(40, 167, 69, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(40, 167, 69, 0); } 100% { box-shadow: 0 0 0 0 rgba(40, 167, 69, 0); } }
   </style>
 </head>
-<body>
+<body data-session-id="<?php echo htmlspecialchars($session_id); ?>">
   <div style="display:flex; align-items:center; gap:15px; margin-bottom:10px;">
     <h1 style="margin:0;">Security Audit</h1>
     <div id="llm-status-badge" style="padding:4px 10px; border-radius:15px; background:#eee; font-size:12px; font-weight:bold; color:#666; display:flex; align-items:center; gap:6px;">

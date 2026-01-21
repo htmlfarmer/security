@@ -11,6 +11,7 @@ from typing import List, Tuple, Dict
 from test_descriptions import get_description
 import requests
 from requests.exceptions import RequestException
+from urllib.parse import urlparse
 
 # LLM server configuration: override via env var LLM_SERVER_URL
 # Default changed to your requested host (uses the /ask endpoint)
@@ -376,7 +377,27 @@ def build_html_report(title: str, sections: List[dict], summary: dict, screensho
             # keep it brief in the section view
             html_parts.append(f"<p>{html.escape(ai_text[:1000])}</p>")
             html_parts.append("</div>")
-        
+
+        # Include any saved follow-up Q&A for this script
+        if sec.get('followups'):
+            html_parts.append("<div class='card'><h3>Follow-up Q&amp;A</h3>")
+            for fu in sec.get('followups', []):
+                ts = fu.get('timestamp')
+                try:
+                    ts_str = datetime.datetime.utcfromtimestamp(int(ts)).isoformat() + ' UTC'
+                except Exception:
+                    ts_str = str(ts)
+                q = html.escape(fu.get('question',''))
+                raw = html.escape((fu.get('response_raw') or '')[:4000])
+                parsed = fu.get('response_parsed')
+                html_parts.append(f"<div style='margin-bottom:10px'><strong>{html.escape(ts_str)}</strong> — <em>Question:</em> {q}<br>")
+                if parsed:
+                    html_parts.append("<pre>" + html.escape(json.dumps(parsed, indent=2)) + "</pre>")
+                else:
+                    html_parts.append("<pre>" + raw + "</pre>")
+                html_parts.append("</div>")
+            html_parts.append("</div>")
+
         html_parts.append("<h4>Test Output:</h4>")
         html_parts.append("<pre>")
         html_parts.append(html.escape(sec['output'][:2000]))
@@ -479,6 +500,29 @@ def main():
     }
     if aggregated_llm_ideas:
         summary['llm_ideas'] = aggregated_llm_ideas
+
+    # Load any persisted follow-ups saved during interactive runs (if present)
+    try:
+        parsed_target = urlparse(target)
+        host = (parsed_target.netloc.split(':')[0]) if parsed_target and parsed_target.netloc else re.sub(r'[^A-Za-z0-9_\-]','_', target)
+        followup_file = os.path.join(OUTPUTS_DIR, f'followups_{host}.json')
+        if os.path.exists(followup_file):
+            try:
+                with open(followup_file, 'r', encoding='utf-8') as ff:
+                    followups = json.load(ff)
+                # attach followups to corresponding sections
+                for fu in followups:
+                    sname = fu.get('script')
+                    for sec in sections:
+                        if sec['name'] == sname:
+                            sec.setdefault('followups', []).append(fu)
+                            break
+                # also include in summary for quick access
+                summary['followups'] = followups
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     inline_b64, screenshot_file = find_screenshot_for_target(target)
 

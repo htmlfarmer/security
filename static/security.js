@@ -9,6 +9,165 @@
       required.forEach(k => { if (!(k in parsed)) missing.push(k); });
       return { ok: missing.length === 0, missing: missing };
     }
+
+    // Track which scripts we've already auto-asked during this run to avoid duplicates
+    const _autoAsked = new Set();
+
+    // Automatically ask the LLM a follow-up question for a script result and attach the reply to the UI
+    async function autoAskFollowup(entry) {
+      try {
+        if (!document.getElementById('enable-llm') || !document.getElementById('enable-llm').checked) return;
+        if (!entry || !entry.script) return;
+        const script = entry.script;
+        if (_autoAsked.has(script)) return;
+        _autoAsked.add(script);
+
+        const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
+        const provider = document.getElementById('llm-provider')?.value || 'gemini';
+        const contextText = (entry.ai_raw || entry.ai_analysis || entry.stdout || '').slice(0,2000);
+        const prompt = `Analyze the results of the security test "${script}". Provide a concise JSON object with keys: \"summary\" (string), \"remediation\" (array of strings), and \"notes\" (string). Context:\n${contextText}`;
+
+        const payload = { prompt: prompt, provider: provider, conversation: [{ role: 'assistant', content: contextText }] };
+        if (mode === 'structured') payload.system_prompt = FOLLOWUP_SYSTEM_PROMPT;
+
+        const aiConsole = document.getElementById('ai-console') || (function(){ const d=document.createElement('div'); d.id='ai-console'; d.style.marginTop='8px'; const summary=document.getElementById('summary'); (summary && summary.parentNode) ? summary.parentNode.insertBefore(d, summary.nextSibling) : document.body.appendChild(d); return d; })();
+        const statusPre = document.createElement('pre'); statusPre.textContent = `[${script}] LLM: Asking follow-up...`; statusPre.style.color = '#0056b3'; aiConsole.appendChild(statusPre);
+
+        const target = (document.getElementById('url') && document.getElementById('url').value) ? document.getElementById('url').value : '';
+        const postBody = { script: script, question: prompt, context: contextText, provider: provider, target: target };
+        const r = await fetch('?action=ask_llm', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(postBody) });
+        if (!r.ok) {
+          statusPre.textContent = `[${script}] LLM: Request failed (${r.status})`;
+          statusPre.style.color = '#a00';
+          return;
+        }
+        const j = await r.json();
+        const rawResp = (j && j.llm && typeof j.llm.raw !== 'undefined') ? String(j.llm.raw||'') : (j && j.llm && typeof j.llm.response !== 'undefined' ? String(j.llm.response||'') : '');
+        statusPre.textContent = `[${script}] LLM: Success`;
+        statusPre.style.color = '#28a745';
+        if (j && j.saved_to) {
+          const note = document.createElement('div'); note.style.fontSize='12px'; note.style.color='#666'; note.style.marginTop='6px'; note.textContent = `Saved to: ${j.saved_to}`; aiConsole.appendChild(note);
+        }
+
+        // attach reply to per-script UI
+        let sec = document.querySelector(`section.script-result[data-script="${script}"]`);
+        if (!sec) { createOrUpdateEntry(entry); sec = document.querySelector(`section.script-result[data-script="${script}"]`); }
+        let aiAnal = sec.querySelector('.ai-analysis'); if (!aiAnal) { aiAnal = document.createElement('div'); aiAnal.className='ai-analysis'; aiAnal.style.marginTop='8px'; aiAnal.style.background='#fff8f0'; aiAnal.style.padding='10px'; aiAnal.style.borderLeft='4px solid #ffc107'; sec.appendChild(aiAnal); }
+
+        // attempt to parse JSON and render summary/remediation/notes
+        let display = rawResp;
+        try { const parsed = JSON.parse(rawResp); if (parsed && typeof parsed === 'object') { const parts=[]; if (parsed.summary) parts.push('Summary: '+parsed.summary); if (parsed.remediation) parts.push('Remediation: '+(Array.isArray(parsed.remediation) ? parsed.remediation.join('; ') : parsed.remediation)); if (parsed.notes) parts.push('Notes: '+parsed.notes); if (parts.length) display = '<div style="white-space:pre-wrap;">'+parts.join('\n\n')+'</div>'; else display = '<pre style="white-space:pre-wrap;">'+JSON.stringify(parsed,null,2)+'</pre>'; } } catch(e){ /* not JSON, show raw */ }
+        aiAnal.innerHTML = '<strong>AI SECURITY ANALYSIS (auto):</strong><div style="margin-top:6px;">' + display + '</div>';
+
+        // attach raw debug content for visibility when debug enabled
+        let rawEl = sec.querySelector('.ai-raw'); if (!rawEl) { rawEl = document.createElement('div'); rawEl.className='ai-raw'; rawEl.style.marginTop = '8px'; rawEl.style.background = '#f6f6f6'; rawEl.style.padding = '8px'; rawEl.style.borderLeft = '4px solid #ccc'; sec.appendChild(rawEl); }
+        rawEl.textContent = rawResp || '';
+        rawEl.style.display = (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked && rawEl.textContent) ? 'block' : 'none';
+
+      } catch (e) { console.error('autoAskFollowup failed', e); }
+    }
+
+    // Ensure an ai-console container exists and return it
+    function getAiConsole(){
+      let aiConsole = document.getElementById('ai-console');
+      if (!aiConsole) {
+        aiConsole = document.createElement('div'); aiConsole.id = 'ai-console'; aiConsole.style.marginTop = '8px';
+        const summary = document.getElementById('summary');
+        if (summary && summary.parentNode) summary.parentNode.insertBefore(aiConsole, summary.nextSibling); else document.body.appendChild(aiConsole);
+      }
+      return aiConsole;
+    }
+
+    // Create or return a per-script ai-console section (includes textarea + send button + response area)
+    function ensureAiConsoleSection(script, suggestedPrompt) {
+      const aiConsole = getAiConsole();
+      let sec = document.getElementById(`ai-console-${script}`);
+      if (!sec) {
+        sec = document.createElement('div'); sec.id = `ai-console-${script}`; sec.style.borderTop = '1px solid #eee'; sec.style.padding = '8px 0';
+        const header = document.createElement('div'); header.innerHTML = `<strong>[${script}] Ask LLM follow-up</strong>`; header.style.marginBottom = '6px';
+        const ta = document.createElement('textarea'); ta.rows = 3; ta.style.width = '100%'; ta.placeholder = 'Ask a follow-up question about this test...'; if (suggestedPrompt) ta.value = suggestedPrompt;
+        const btn = document.createElement('button'); btn.textContent = 'Send'; btn.className = 'btn'; btn.style.marginTop = '6px'; btn.style.marginRight = '8px';
+        const resp = document.createElement('div'); resp.className = 'ai-console-response'; resp.style.marginTop = '8px';
+        sec.appendChild(header); sec.appendChild(ta); sec.appendChild(btn); sec.appendChild(resp);
+        aiConsole.appendChild(sec);
+
+        // Load any previously saved follow-ups for this script/target and render them
+        (async () => {
+          try {
+            const target = (document.getElementById('url') && document.getElementById('url').value) ? document.getElementById('url').value : '';
+            if (target) {
+              const r = await fetch(`?action=get_followups&target=${encodeURIComponent(target)}&script=${encodeURIComponent(script)}`);
+              if (r.ok) {
+                const j = await r.json(); if (j && Array.isArray(j.followups) && j.followups.length) {
+                  resp.innerHTML = '<strong>Previously saved follow-ups:</strong>';
+                  j.followups.forEach(fu=>{
+                    const d = document.createElement('div'); d.style.marginTop='8px'; d.innerHTML = `<em>${new Date((fu.timestamp||0)*1000).toISOString()}</em> — <strong>Q:</strong> ${(fu.question||'')}<br><pre>${(fu.response_raw||'')}</pre>`;
+                    resp.appendChild(d);
+                  });
+                }
+              }
+            }
+          } catch(e){ console.error('loading previous followups failed', e); }
+        })();
+
+        btn.addEventListener('click', async ()=>{
+          const q = ta.value && ta.value.trim(); if (!q) { alert('Enter a question'); return; }
+          btn.disabled = true; btn.textContent = 'Asking...';
+          try { await sendFollowupQuestion(script, q, resp); } catch (e) { resp.innerHTML = `<span style="color:#a00">Request failed: ${String(e)}</span>`; }
+          finally { btn.disabled = false; btn.textContent = 'Send'; }
+        });
+      }
+      return sec;
+    }
+
+    // Send follow-up question using shared LLM call logic and attach reply to UI and per-script card
+    async function sendFollowupQuestion(script, question, respContainer) {
+      const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
+      const provider = document.getElementById('llm-provider')?.value || 'gemini';
+      // Grab context from the per-script card if available
+      const secCard = document.querySelector(`section.script-result[data-script="${script}"]`);
+      const contextText = secCard ? ((secCard.querySelector('.ai-raw')?.textContent || secCard.querySelector('pre.stdout')?.textContent || '')).slice(0,2000) : '';
+      const payload = { prompt: question, provider: provider, conversation: [{ role: 'assistant', content: contextText }] };
+      if (mode === 'structured') payload.system_prompt = FOLLOWUP_SYSTEM_PROMPT;
+
+      if (respContainer) {
+        respContainer.innerHTML = `<em>Asking LLM...</em>`;
+      }
+
+      // POST to server-side ask_llm endpoint so the follow-up is persisted for reports
+      const target = (document.getElementById('url') && document.getElementById('url').value) ? document.getElementById('url').value : '';
+      const postBody = { script: script, question: question, context: contextText, provider: provider, target: target };
+      const r = await fetch('?action=ask_llm', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(postBody) });
+      if (!r.ok) {
+        if (respContainer) respContainer.innerHTML = `<span style="color:#a00">LLM request failed: ${r.status}</span>`;
+        throw new Error('LLM request failed');
+      }
+      const j = await r.json(); const rawResp = (j && j.llm && typeof j.llm.raw !== 'undefined') ? String(j.llm.raw||'') : (j && j.llm && typeof j.llm.response !== 'undefined' ? String(j.llm.response||'') : '');
+
+      // Attach response to the ai-console area
+      if (respContainer) {
+        // attempt to format JSON structured replies nicely
+        let display = rawResp;
+        try { const parsed = JSON.parse(rawResp); if (parsed && typeof parsed === 'object') { let parts = []; if (parsed.summary) parts.push('Summary: ' + parsed.summary); if (parsed.remediation) parts.push('Remediation: ' + (Array.isArray(parsed.remediation) ? parsed.remediation.join('; ') : parsed.remediation)); if (parsed.notes) parts.push('Notes: ' + parsed.notes); if (parts.length) display = '<div style="white-space:pre-wrap;">' + parts.join('\n\n') + '</div>'; else display = '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>'; } } catch(e){ /* ignore parse errors */ }
+        respContainer.innerHTML = '<strong>LLM reply:</strong>' + display;
+        if (j && j.saved_to) {
+          const note = document.createElement('div'); note.style.fontSize='12px'; note.style.color='#666'; note.style.marginTop='6px'; note.textContent = `Saved to: ${j.saved_to}`; respContainer.appendChild(note);
+        }
+        if (rawResp) { const dbg = document.createElement('pre'); dbg.style.whiteSpace = 'pre-wrap'; dbg.textContent = rawResp; dbg.setAttribute('data-raw','1'); dbg.style.display = (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked) ? 'block' : 'none'; respContainer.appendChild(dbg); }
+      }
+
+      // Also attach reply into the per-script card AI analysis area for visibility
+      if (secCard) {
+        let aiAnal = secCard.querySelector('.ai-analysis'); if (!aiAnal) { aiAnal = document.createElement('div'); aiAnal.className='ai-analysis'; aiAnal.style.marginTop='8px'; aiAnal.style.background='#fff8f0'; aiAnal.style.padding='10px'; aiAnal.style.borderLeft='4px solid #ffc107'; secCard.appendChild(aiAnal); }
+        aiAnal.innerHTML = '<strong>AI SECURITY ANALYSIS (follow-up):</strong><div style="margin-top:6px;">' + (respContainer ? respContainer.innerHTML : (rawResp || '')) + '</div>';
+        let rawEl = secCard.querySelector('.ai-raw'); if (!rawEl) { rawEl = document.createElement('div'); rawEl.className='ai-raw'; rawEl.style.marginTop = '8px'; rawEl.style.background = '#f6f6f6'; rawEl.style.padding = '8px'; rawEl.style.borderLeft = '4px solid #ccc'; secCard.appendChild(rawEl); }
+        rawEl.textContent = rawResp || '';
+        rawEl.style.display = (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked && rawEl.textContent) ? 'block' : 'none';
+      }
+
+      return j;
+    }
+
     async function loadScripts(){
       const r = await fetch('?action=scripts');
       const data = await r.json();
@@ -33,8 +192,31 @@
       let el = document.querySelector(`section.script-result[data-script="${entry.script}"]`);
       if (!el) {
         el = document.createElement('section'); el.className='script-result'; el.setAttribute('data-script', entry.script);
-        const h=document.createElement('h4'); h.textContent = entry.script; el.appendChild(h);
-          const cmdPre = document.createElement('pre'); cmdPre.className='cmd'; cmdPre.style.background='#f0f8ff'; cmdPre.style.padding='6px'; cmdPre.style.borderLeft='4px solid #cce'; cmdPre.style.display='none'; cmdPre.style.whiteSpace='pre-wrap'; el.appendChild(cmdPre);
+        // Header with visible follow-up button
+        const header = document.createElement('div'); header.style.display = 'flex'; header.style.alignItems = 'center'; header.style.justifyContent = 'space-between';
+        const title = document.createElement('h4'); title.textContent = entry.script; title.style.margin = '0';
+        const followBtn = document.createElement('button'); followBtn.textContent = 'Ask follow-up'; followBtn.className = 'btn ghost'; followBtn.style.marginLeft = '8px';
+        followBtn.addEventListener('click', ()=>{
+          // If LLM analysis is disabled, prompt user to enable it first
+          const llmEnabled = document.getElementById('enable-llm') && document.getElementById('enable-llm').checked;
+          if (!llmEnabled) {
+            if (!confirm('LLM analysis is currently disabled. Enable LLM analysis to ask follow-up questions?')) return;
+            document.getElementById('enable-llm').checked = true;
+          }
+          // Toggle/create follow-up UI below the card
+          let fw = el.querySelector('.followup-wrap');
+          if (!fw) {
+            // createOrUpdateEntry will create the followup UI when invoked with the current entry
+            createOrUpdateEntry(entry);
+            setTimeout(()=>{ const fw2 = el.querySelector('.followup-wrap'); if (fw2) { const btn = fw2.querySelector('button'); if (btn) btn.click(); } }, 50);
+          } else {
+            const toggleBtn = fw.querySelector('button'); if (toggleBtn) toggleBtn.click();
+          }
+        });
+        const right = document.createElement('div'); right.style.display='flex'; right.style.alignItems='center'; right.appendChild(followBtn);
+        header.appendChild(title); header.appendChild(right); el.appendChild(header);
+
+        const cmdPre = document.createElement('pre'); cmdPre.className='cmd'; cmdPre.style.background='#f0f8ff'; cmdPre.style.padding='6px'; cmdPre.style.borderLeft='4px solid #cce'; cmdPre.style.display='none'; cmdPre.style.whiteSpace='pre-wrap'; el.appendChild(cmdPre);
         const pre=document.createElement('pre'); pre.className='stdout'; el.appendChild(pre);
         const err=document.createElement('pre'); err.className='stderr'; el.appendChild(err);
         const findings=document.createElement('div'); findings.className='findings'; el.appendChild(findings);
@@ -94,11 +276,12 @@
           send.disabled = true; send.textContent = 'Asking...';
           try {
             // Build a prompt including context and the user's question
-            const prompt_text = `Follow-up question about script: ${entry.script}\nContext:\n${(entry.ai_raw || entry.stdout || '').slice(0,2000)}\n\nQuestion:\n${q}`;
             // Respect response mode: structured vs free-text
             const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
             const provider = document.getElementById('llm-provider')?.value || 'gemini';
-            const payload = { prompt: prompt_text, provider: provider };
+            // Send the previous assistant reply as conversation context for better follow-ups
+            const contextText = (entry.ai_raw || entry.ai_analysis || entry.stdout || '').slice(0,2000);
+            const payload = { prompt: q, provider: provider, conversation: [{ role: 'assistant', content: contextText }] };
             if (mode === 'structured') payload.system_prompt = FOLLOWUP_SYSTEM_PROMPT;
             const r = await fetch(LLM_SERVER_URL, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
             const j = await r.json();
@@ -200,6 +383,7 @@
 
       // clear previous results and summary
       document.getElementById('results').innerHTML = ''; document.getElementById('summary').innerHTML = '';
+      _autoAsked.clear();
       const aiConsole = document.getElementById('ai-console');
       if (aiConsole) aiConsole.innerHTML = ''; // safe: only clear if present
 
@@ -253,6 +437,7 @@
       if(!url){alert('Enter a target URL'); return;}
       // clear previous results and summary
       document.getElementById('results').innerHTML = ''; document.getElementById('summary').innerHTML = '';
+      _autoAsked.clear();
       // mark all cards running visually (server will emit start/result for actual ones)
       Array.from(document.querySelectorAll('#tests input')).map(i=>i.value).forEach(s=>setCardRunning(s));
       // create per-card progress placeholders
@@ -292,6 +477,7 @@
                   totalScripts++;
                 } else if (obj.type === 'result'){
                   createOrUpdateEntry(obj.entry);
+                  try { if (typeof autoAskFollowup === 'function') autoAskFollowup(obj.entry); } catch(e){ console.error('autoAskFollowup failed', e); }
                   finishCardProgress(obj.entry.script);
                   completedScripts++;
                   const pct = totalScripts ? Math.round((completedScripts/totalScripts)*100) : 100;
@@ -312,6 +498,7 @@
     async function runAll(){
       const url=document.getElementById('url').value; if(!url){alert('Enter a target URL'); return;}
       document.getElementById('results').innerHTML = '<em>Running...</em>'; document.getElementById('summary').innerHTML = '';
+      _autoAsked.clear();
       document.getElementById('ai-console').innerHTML = '';
 
       const r = await fetch('?action=scripts'); const data = await r.json();
@@ -346,6 +533,19 @@
         if (scriptDiv) {
           // Final result can be processed here if needed
         }
+        // automatically ask follow-up via LLM for this test result (if LLM enabled)
+        try {
+          if (typeof autoAskFollowup === 'function' && data.entry) {
+            autoAskFollowup(data.entry);
+          }
+        } catch (e) { console.error('autoAskFollowup failed', e); }
+
+        // ensure a per-script AI console section exists so users can ask follow-ups centrally
+        try {
+          const excerpt = (data.entry && (data.entry.ai_raw || data.entry.ai_analysis || data.entry.stdout)) ? ((data.entry.stdout || '').slice(0,300)) : '';
+          const suggestion = excerpt ? `Analyze the following raw scanner output and identify security implications.\n\nRaw Output Excerpt (chars):\n${excerpt}` : '';
+          ensureAiConsoleSection(data.entry.script, suggestion);
+        } catch (e) { console.error('ensureAiConsoleSection failed', e); }
       } else if (data.type === 'summary') {
         if(data.summary && data.summary.length){ const ul=document.createElement('ul'); data.summary.forEach(s=>{const li=document.createElement('li'); li.textContent=s; ul.appendChild(li)}); sumDiv.appendChild(ul);} else sumDiv.textContent='No findings';
       } else if (data.type === 'llm_request') {
@@ -391,13 +591,24 @@
       } else if (data.type === 'llm_result') {
         let theConsole = aiConsole || document.getElementById('ai-console');
         if (!theConsole) { theConsole = document.createElement('div'); theConsole.id='ai-console'; theConsole.style.marginTop='8px'; const summary = document.getElementById('summary'); if (summary && summary.parentNode) summary.parentNode.insertBefore(theConsole, summary.nextSibling); else document.body.appendChild(theConsole); }
-        const sec = document.querySelector(`section.script-result[data-script="${data.script}"]`);
+        // ensure a per-script card exists so the follow-up UI is available
+        let sec = document.querySelector(`section.script-result[data-script="${data.script}"]`);
+        if (!sec) {
+          createOrUpdateEntry({ script: data.script, stdout: '', stderr: '', findings: [] });
+          sec = document.querySelector(`section.script-result[data-script="${data.script}"]`);
+        }
         if (sec) {
           let aiAnal = sec.querySelector('.ai-analysis'); if (!aiAnal) { aiAnal = document.createElement('div'); aiAnal.className='ai-analysis'; aiAnal.style.marginTop='8px'; aiAnal.style.background='#fff8f0'; aiAnal.style.padding='10px'; aiAnal.style.borderLeft='4px solid #ffc107'; sec.appendChild(aiAnal); }
           aiAnal.innerHTML = '<strong>AI SECURITY ANALYSIS (live):</strong><div style="margin-top:6px;white-space:pre-wrap;">' + (data.analysis || '') + '</div>';
           let rawEl = sec.querySelector('.ai-raw'); if (!rawEl) { rawEl = document.createElement('div'); rawEl.className='ai-raw'; rawEl.style.marginTop = '8px'; rawEl.style.background = '#f6f6f6'; rawEl.style.padding = '8px'; rawEl.style.borderLeft = '4px solid #ccc'; sec.appendChild(rawEl); }
           rawEl.textContent = data.raw || '';
           rawEl.style.display = (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked && rawEl.textContent) ? 'block' : 'none';
+
+          // create a per-script ai-console section (so users can ask follow-ups from the ai-console as well)
+          try {
+            const suggestion = (data.analysis || data.raw) ? `Based on the LLM analysis below, provide a concise remediation and one-sentence summary.` : '';
+            ensureAiConsoleSection(data.script, suggestion);
+          } catch (e) { console.error('ensureAiConsoleSection failed', e); }
         } else {
           const pre = document.createElement('pre'); pre.textContent = `[${data.script}] LLM RESULT:\n${data.analysis || ''}`; theConsole.appendChild(pre);
         }
@@ -421,7 +632,7 @@
       attachSafe('run-selected', 'click', runSelected);
       attachSafe('run-level', 'click', runLevel);
       attachSafe('run-all', 'click', runAll);
-      attachSafe('stop-all', 'click', async ()=>{ try { await fetch('?action=stop_all', { method: 'POST' }); } catch(e){ console.error('stop request failed', e); } if (window.currentAbortController) window.currentAbortController.abort(); });
+      attachSafe('stop-all', 'click', async ()=>{ try { await fetch('?action=stop_all', { method: 'POST', credentials: 'same-origin' }); } catch(e){ console.error('stop request failed', e); } if (window.currentAbortController) window.currentAbortController.abort(); });
       attachSafe('select-all', 'click', ()=>{ document.querySelectorAll('#tests input[type=checkbox]').forEach(i=>i.checked=true); });
       attachSafe('clear-selection', 'click', ()=>{ document.querySelectorAll('#tests input[type=checkbox]').forEach(i=>i.checked=false); });
 
@@ -440,10 +651,11 @@
           if (!respDiv) { respDiv = document.createElement('div'); respDiv.id = respDivId; respDiv.style.marginTop='12px'; const controls = document.querySelector('.controls'); if (controls) controls.appendChild(respDiv); else document.body.appendChild(respDiv); }
           respDiv.innerHTML = '<em>Asking...</em>';
           try {
-            const prompt_text = `General security question:\n\n${question}`;
             const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
             const provider = document.getElementById('llm-provider')?.value || 'gemini';
-            const payload = { prompt: prompt_text, provider: provider };
+            // Use summary text as assistant context when asking a global follow-up
+            const summaryText = (document.getElementById('summary') && document.getElementById('summary').innerText) ? document.getElementById('summary').innerText.slice(0,2000) : '';
+            const payload = { prompt: question, provider: provider, conversation: [{ role: 'assistant', content: summaryText }] };
             if (mode === 'structured') payload.system_prompt = FOLLOWUP_SYSTEM_PROMPT;
             const r = await fetch(LLM_SERVER_URL, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
             if (!r.ok) {
