@@ -133,14 +133,8 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
     $prompt .= "\nRaw Output Excerpt (" . strlen($excerpt) . " chars):\n" . $excerpt;
   }
 
-  $system = 'You are an expert security analyst. Analyze the provided scanner output and respond ONLY with a valid JSON object. Do not include any other text.
-  Keys required:
-  "summary": A concise overview of the results (2-3 sentences).
-  "reason": Describe what you think the technical purpose or reason for running this specific test is, based on the output.
-  "findings": A list or summary of specific vulnerabilities or security concerns you identified.
-  "remediation": Actionable suggestions to mitigate the identified risks.
-  "examples": Provide one or more examples of how to solve the identified vulnerabilities or security concerns.';
-  
+  $system = 'You are an expert security analyst. Analyze the provided scanner output and respond ONLY with a valid JSON object. Do not include any other text.\n\nPreferred keys:\n"summary": A concise overview of the results (2-3 sentences).\n"remediation": Actionable suggestions to mitigate the identified risks (array of strings).\n"notes": Optional additional context, limitations, or observations (string).\n\nOptional keys you may also include:\n"reason": Describe what you think the technical purpose or reason for running this specific test is, based on the output.\n"findings": A list or summary of specific vulnerabilities or security concerns you identified.\n"examples": Provide one or more examples of how to solve the identified vulnerabilities or security concerns.\n\nKeep replies as strict JSON only.';
+
   // If caller requested free-text mode, do not include a strict system prompt forcing JSON
   $payload_array = array('prompt' => $prompt, 'provider' => $provider);
   if ($mode === 'free-text') {
@@ -155,9 +149,13 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
 
   // If streaming, send prompt to client for debug console and indicate LLM started
   if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
-    stream_json_line(array('type' => 'llm_request', 'script' => $script, 'prompt' => $prompt));
+    stream_json_line(array('type' => 'llm_request', 'script' => $script, 'prompt' => $prompt, 'provider' => $provider));
     // indicate the LLM invocation has started (waiting indefinitely)
-    stream_json_line(array('type' => 'llm_status', 'script' => $script, 'status' => 'waiting'));
+    stream_json_line(array('type' => 'llm_status', 'script' => $script, 'status' => 'waiting', 'provider' => $provider));
+    // persist a short debug record for offline troubleshooting
+    $outdir = __DIR__ . DIRECTORY_SEPARATOR . 'outputs';
+    if (!file_exists($outdir)) { @mkdir($outdir, 0755, true); }
+    @file_put_contents($outdir . DIRECTORY_SEPARATOR . 'llm_debug.log', "[" . date('c') . "] REQUEST script=$script provider=" . ($provider?:'<none>') . "; prompt_len=" . strlen($prompt) . "\n", FILE_APPEND | LOCK_EX);
   }
 
   // Set a generous 90-second timeout for the LLM request
@@ -183,6 +181,10 @@ function call_llm_php($script, $findings, $suggestions, $output, $reason = '', $
      $provider_info = isset($json['provider']) ? $json['provider'] : '';
      if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
        stream_json_line(array('type' => 'llm_status', 'script' => $script, 'status' => 'success', 'duration' => $dur, 'provider' => $provider_info));
+       // store a short debug snippet of the raw response for offline inspection
+       $outdir = __DIR__ . DIRECTORY_SEPARATOR . 'outputs';
+       if (!file_exists($outdir)) { @mkdir($outdir, 0755, true); }
+       @file_put_contents($outdir . DIRECTORY_SEPARATOR . 'llm_debug.log', "[" . date('c') . "] RESPONSE script=$script provider={$provider_info} duration={$dur}s resp=" . substr($resp,0,2000) . "\n", FILE_APPEND | LOCK_EX);
      }
   } else {
      if ((isset($_SERVER['HTTP_X_STREAM']) && $_SERVER['HTTP_X_STREAM'] === '1') || isset($_GET['stream'])) {
@@ -1050,7 +1052,7 @@ if ($method === 'POST') {
   <script>
     // Configuration from PHP environment - defined globally for static/security.js
     window.LLM_SERVER_URL = '<?php echo htmlspecialchars(getenv("LLM_SERVER_URL") ?: "http://ashy.tplinkdns.com:5005/ask"); ?>';
-    window.FOLLOWUP_SYSTEM_PROMPT = '<?php echo htmlspecialchars("You are a concise security analyst. Respond ONLY with a JSON object with keys: \"answer\" (string), \"severity\" (High|Medium|Low), and \"confidence\" (a number between 0.0 and 1.0). Do not include any other text outside the JSON."); ?>';
+    window.FOLLOWUP_SYSTEM_PROMPT = '<?php echo htmlspecialchars("You are a concise security analyst. Respond ONLY with a JSON object. Preferred keys: \"summary\" (string), \"remediation\" (array of strings), and \"notes\" (string). Optional keys: \"reason\", \"findings\", \"examples\". Keep replies short and return strict JSON only."); ?>';
   </script>
   <script src="static/security.js"></script>
 </body>

@@ -1,13 +1,19 @@
 // Use global configuration if available, otherwise fall back to defaults
     const LLM_SERVER_URL = window.LLM_SERVER_URL || 'http://ashy.tplinkdns.com:5005/ask';
-    const FOLLOWUP_SYSTEM_PROMPT = window.FOLLOWUP_SYSTEM_PROMPT || 'You are a concise security analyst. Respond ONLY with a JSON object with keys: "answer" (string), "severity" (High|Medium|Low), and "confidence" (a number between 0.0 and 1.0).';
-    // Helper: validate structured response contains required fields
+    // Default follow-up system prompt: request concise JSON with summary/remediation/notes
+    const FOLLOWUP_SYSTEM_PROMPT = window.FOLLOWUP_SYSTEM_PROMPT || 'You are a concise security analyst. Respond ONLY with a JSON object with keys: "summary" (string), "remediation" (array of strings), and "notes" (string). Keep replies short and return strict JSON only.';
+    // Helper: validate structured response contains required fields. Accepts either the old answer/severity/confidence schema
+    // or the expected follow-up schema summary/remediation/notes.
     function validateStructured(parsed){
-      const required = ['answer','severity','confidence'];
       const missing = [];
-      if (!parsed || typeof parsed !== 'object') { return {ok:false, missing: required.slice(), msg: 'Not an object'}; }
-      required.forEach(k => { if (!(k in parsed)) missing.push(k); });
-      return { ok: missing.length === 0, missing: missing };
+      if (!parsed || typeof parsed !== 'object') { return {ok:false, missing: [], msg: 'Not an object'}; }
+      const schemaA = ['answer','severity','confidence'];
+      const schemaB = ['summary','remediation','notes'];
+      const missingA = schemaA.filter(k => !(k in parsed));
+      const missingB = schemaB.filter(k => !(k in parsed));
+      if (missingA.length === 0 || missingB.length === 0) { return { ok:true, missing: [] }; }
+      // default to reporting missing fields for the follow-up schema (schemaB)
+      return { ok:false, missing: missingB, msg: 'Missing required structured fields' };
     }
 
     // Track which scripts we've already auto-asked during this run to avoid duplicates
@@ -228,7 +234,9 @@ const provider = document.getElementById('llm-provider')?.value || '';
       // AI analysis
       let aiEl = el.querySelector('.ai-analysis');
       if (!aiEl) { aiEl = document.createElement('div'); aiEl.className = 'ai-analysis'; aiEl.style.marginTop = '8px'; aiEl.style.background = '#fff8f0'; aiEl.style.padding = '10px'; aiEl.style.borderLeft = '4px solid #ffc107'; el.appendChild(aiEl); }
-      if (entry.ai_analysis) {
+      // Only update AI analysis if the server explicitly provided a non-empty value in the entry object.
+      // This avoids clobbering client-added analysis when subsequent server results send empty strings.
+      if (typeof entry.ai_analysis !== 'undefined' && entry.ai_analysis !== null && String(entry.ai_analysis).trim() !== '') {
         // Try to parse raw assistant reply (entry.ai_raw) or ai_analysis as JSON and render human-friendly fields
         let rendered = '';
         let rawText = entry.ai_raw || entry.ai_analysis || '';
@@ -248,13 +256,13 @@ const provider = document.getElementById('llm-provider')?.value || '';
           rendered = '<div style="white-space:pre-wrap;">' + entry.ai_analysis + '</div>';
         }
         aiEl.innerHTML = '<strong>AI SECURITY ANALYSIS:</strong><div style="margin-top:6px;">' + rendered + '</div>';
-      } else { aiEl.innerHTML = ''; }
+      }
       // show command that was executed (if available)
       const cmdEl = el.querySelector('pre.cmd'); if (entry.cmd) { cmdEl.textContent = entry.cmd; cmdEl.style.display = 'block'; } else { cmdEl.style.display = 'none'; }
       // raw debug area (hidden unless "Show LLM debug" checked)
       let rawEl = el.querySelector('.ai-raw');
       if (!rawEl) { rawEl = document.createElement('div'); rawEl.className = 'ai-raw'; rawEl.style.marginTop = '8px'; rawEl.style.background = '#f6f6f6'; rawEl.style.padding = '8px'; rawEl.style.borderLeft = '4px solid #ccc'; rawEl.style.display = 'none'; el.appendChild(rawEl); }
-      if (entry.ai_raw) { rawEl.textContent = entry.ai_raw; } else { rawEl.textContent = ''; }
+      if (typeof entry.ai_raw !== 'undefined' && entry.ai_raw !== null && String(entry.ai_raw).trim() !== '') { rawEl.textContent = entry.ai_raw; }
       // toggle visibility based on UI checkbox
       const showDebug = document.getElementById('show-llm-debug');
       if (showDebug && showDebug.checked && rawEl.textContent) rawEl.style.display = 'block'; else rawEl.style.display = 'none';
@@ -404,6 +412,7 @@ const provider = document.getElementById('llm-provider')?.value || '';
         prefer_connect_scan: document.getElementById('prefer-connect-scan').checked, 
         llm: document.getElementById('enable-llm').checked, 
         llm_mode: (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured',
+        llm_provider: document.getElementById('llm-provider')?.value || '',
         llm_url: llm_url_ovr,
         llm_timeout: llm_timeout_ovr,
         llm_retries: llm_retries_ovr,
@@ -502,7 +511,19 @@ const provider = document.getElementById('llm-provider')?.value || '';
       document.getElementById('ai-console').innerHTML = '';
 
       const r = await fetch('?action=scripts'); const data = await r.json();
-      const resp = await fetch('?stream=1', {method:'POST', headers:{'Content-Type':'application/json','X-Stream':'1'}, body: JSON.stringify({url, tests: data.scripts})});
+      const llm_url_ovr = document.getElementById('llm-url-override')?.value || '';
+      const llm_timeout_ovr = document.getElementById('llm-timeout-override')?.value || '';
+      const llm_retries_ovr = document.getElementById('llm-retries-override')?.value || '';
+      const resp = await fetch('?stream=1', {method:'POST', headers:{'Content-Type':'application/json','X-Stream':'1'}, body: JSON.stringify({
+        url, tests: data.scripts,
+        llm: document.getElementById('enable-llm')?.checked || false,
+        llm_mode: (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured',
+        llm_provider: document.getElementById('llm-provider')?.value || '',
+        llm_url: llm_url_ovr,
+        llm_timeout: llm_timeout_ovr,
+        llm_retries: llm_retries_ovr,
+        llm_max_excerpt: document.getElementById('llm-max-excerpt')?.value
+      })});
       if (!resp.body) { alert('Streaming not available; server did not return a stream.'); return; }
       const reader = resp.body.getReader();
       const decoder = new TextDecoder(); let buf = '';
@@ -599,14 +620,18 @@ const provider = document.getElementById('llm-provider')?.value || '';
         }
         if (sec) {
           let aiAnal = sec.querySelector('.ai-analysis'); if (!aiAnal) { aiAnal = document.createElement('div'); aiAnal.className='ai-analysis'; aiAnal.style.marginTop='8px'; aiAnal.style.background='#fff8f0'; aiAnal.style.padding='10px'; aiAnal.style.borderLeft='4px solid #ffc107'; sec.appendChild(aiAnal); }
-          aiAnal.innerHTML = '<strong>AI SECURITY ANALYSIS (live):</strong><div style="margin-top:6px;white-space:pre-wrap;">' + (data.analysis || '') + '</div>';
+          // Only replace live analysis if server provided a non-empty analysis field; preserve existing content otherwise
+          if (typeof data.analysis !== 'undefined' && data.analysis !== null && String(data.analysis).trim() !== '') {
+            aiAnal.innerHTML = '<strong>AI SECURITY ANALYSIS (live):</strong><div style="margin-top:6px;white-space:pre-wrap;">' + data.analysis + '</div>';
+          }
           let rawEl = sec.querySelector('.ai-raw'); if (!rawEl) { rawEl = document.createElement('div'); rawEl.className='ai-raw'; rawEl.style.marginTop = '8px'; rawEl.style.background = '#f6f6f6'; rawEl.style.padding = '8px'; rawEl.style.borderLeft = '4px solid #ccc'; sec.appendChild(rawEl); }
-          rawEl.textContent = data.raw || '';
+          // Only update raw debug text if server provided it explicitly
+          if (typeof data.raw !== 'undefined' && data.raw !== null && String(data.raw).trim() !== '') { rawEl.textContent = data.raw; }
           rawEl.style.display = (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked && rawEl.textContent) ? 'block' : 'none';
 
           // create a per-script ai-console section (so users can ask follow-ups from the ai-console as well)
           try {
-            const suggestion = (data.analysis || data.raw) ? `Based on the LLM analysis below, provide a concise remediation and one-sentence summary.` : '';
+            const suggestion = ((typeof data.analysis !== 'undefined' && data.analysis) || (typeof data.raw !== 'undefined' && data.raw)) ? `Based on the LLM analysis below, provide a concise remediation and one-sentence summary.` : '';
             ensureAiConsoleSection(data.script, suggestion);
           } catch (e) { console.error('ensureAiConsoleSection failed', e); }
         } else {

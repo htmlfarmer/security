@@ -6,6 +6,7 @@ import ssl
 import socket
 import argparse
 from datetime import datetime
+from urllib.parse import urlparse
 
 
 def get_cert(host, port=443, timeout=5):
@@ -44,11 +45,21 @@ def main():
     p.add_argument('host')
     args = p.parse_args()
     host = args.host
-    if ':' in host:
-        h, pport = host.split(':',1)
-        port = int(pport)
+    # Accept either a bare host, host:port, or a full URL (http(s)://host[:port]/...)
+    # Use urlparse for robust parsing and fall back to port 443.
+    parsed = urlparse(host if '://' in host else '//' + host)
+    netloc = parsed.netloc or parsed.path or host
+    # strip possible trailing slashes
+    netloc = netloc.rstrip('/')
+    if ':' in netloc:
+        h, pport = netloc.split(':', 1)
+        try:
+            port = int(pport)
+        except Exception:
+            port = 443
     else:
-        h = host; port = 443
+        h = netloc
+        port = 443
     try:
         cert = get_cert(h, port)
     except Exception as e:
