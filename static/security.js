@@ -18,6 +18,8 @@
 
     // Track which scripts we've already auto-asked during this run to avoid duplicates
     const _autoAsked = new Set();
+    // Track the latest LLM status line per-script so we can update it in-place and attach inline analysis
+    const _llmStatusPre = {};
 
     // Automatically ask the LLM a follow-up question for a script result and attach the reply to the UI
     async function autoAskFollowup(entry) {
@@ -596,19 +598,25 @@ const provider = document.getElementById('llm-provider')?.value || '';
         if (data.http_code) statusText += ` HTTP ${data.http_code}`;
         if (data.err) statusText += ` err: ${data.err}`;
         
-        const preStatus = document.createElement('pre'); preStatus.textContent = statusText; 
-        if (data.status === 'error') preStatus.style.color='#a00';
-        else if (data.status === 'success') preStatus.style.color='#28a745';
-        else preStatus.style.color='#0056b3';
-        theConsole.appendChild(preStatus);
-        
-        // update per-script LLM status badge
-        const sec = document.querySelector(`section.script-result[data-script="${data.script}"]`);
-        if (sec) {
-          let sEl = sec.querySelector('.ai-status'); if (!sEl) { sEl = document.createElement('div'); sEl.className='ai-status'; sEl.style.marginTop='6px'; sEl.style.fontSize='13px'; sec.appendChild(sEl); }
-          sEl.textContent = statusText; 
-          sEl.style.color = (data.status === 'error') ? '#a00' : (data.status === 'success' ? '#28a745' : '#0056b3');
-        }
+        // Reuse an existing status line for this script when possible so updates (waiting->success/error)
+      // replace the previous status text instead of appending new lines.
+      let preStatus = _llmStatusPre[data.script];
+      if (!preStatus) {
+        preStatus = document.createElement('pre'); preStatus.dataset.script = data.script; theConsole.appendChild(preStatus);
+        _llmStatusPre[data.script] = preStatus;
+      }
+      preStatus.textContent = statusText;
+      if (data.status === 'error') preStatus.style.color='#a00';
+      else if (data.status === 'success') preStatus.style.color='#28a745';
+      else preStatus.style.color='#0056b3';
+
+      // update per-script LLM status badge
+      const sec = document.querySelector(`section.script-result[data-script="${data.script}"]`);
+      if (sec) {
+        let sEl = sec.querySelector('.ai-status'); if (!sEl) { sEl = document.createElement('div'); sEl.className='ai-status'; sEl.style.marginTop='6px'; sEl.style.fontSize='13px'; sec.appendChild(sEl); }
+        sEl.textContent = statusText; 
+        sEl.style.color = (data.status === 'error') ? '#a00' : (data.status === 'success' ? '#28a745' : '#0056b3');
+      }
       } else if (data.type === 'llm_result') {
         let theConsole = aiConsole || document.getElementById('ai-console');
         if (!theConsole) { theConsole = document.createElement('div'); theConsole.id='ai-console'; theConsole.style.marginTop='8px'; const summary = document.getElementById('summary'); if (summary && summary.parentNode) summary.parentNode.insertBefore(theConsole, summary.nextSibling); else document.body.appendChild(theConsole); }
@@ -628,6 +636,22 @@ const provider = document.getElementById('llm-provider')?.value || '';
           // Only update raw debug text if server provided it explicitly
           if (typeof data.raw !== 'undefined' && data.raw !== null && String(data.raw).trim() !== '') { rawEl.textContent = data.raw; }
           rawEl.style.display = (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked && rawEl.textContent) ? 'block' : 'none';
+
+          // Also attach a small inline analysis next to the status line in the ai-console (if it's present)
+          try {
+            const statusPre = _llmStatusPre[data.script];
+            if (statusPre) {
+              // avoid duplicate inline blocks
+              let inline = statusPre.nextElementSibling;
+              if (!inline || !inline.classList || !inline.classList.contains('llm-inline-analysis')) {
+                inline = document.createElement('div'); inline.className = 'llm-inline-analysis'; inline.style.margin = '6px 0 12px 8px'; inline.style.padding = '6px'; inline.style.background = '#fff8f0'; inline.style.borderLeft = '3px solid #ffc107';
+                statusPre.parentNode.insertBefore(inline, statusPre.nextSibling);
+              }
+              // Prefer server-provided analysis or raw fallback
+              const inlineText = (data.analysis && String(data.analysis).trim() !== '') ? ('<strong>AI:</strong> ' + data.analysis) : ((data.raw && String(data.raw).trim() !== '') ? ('<pre style="white-space:pre-wrap;">' + data.raw + '</pre>') : '');
+              if (inlineText) inline.innerHTML = inlineText;
+            }
+          } catch (e) { console.error('attach inline analysis failed', e); }
 
           // create a per-script ai-console section (so users can ask follow-ups from the ai-console as well)
           try {
