@@ -195,153 +195,67 @@ const provider = document.getElementById('llm-provider')?.value || '';
       return await resp.json();
     }
 
-    function createOrUpdateEntry(entry){
-      const res=document.getElementById('results');
-      let el = document.querySelector(`section.script-result[data-script="${entry.script}"]`);
-      if (!el) {
-        el = document.createElement('section'); el.className='script-result'; el.setAttribute('data-script', entry.script);
-        // Header with visible follow-up button
-        const header = document.createElement('div'); header.style.display = 'flex'; header.style.alignItems = 'center'; header.style.justifyContent = 'space-between';
-        const title = document.createElement('h4'); title.textContent = entry.script; title.style.margin = '0';
-        const followBtn = document.createElement('button'); followBtn.textContent = 'Ask follow-up'; followBtn.className = 'btn ghost'; followBtn.style.marginLeft = '8px';
-        followBtn.addEventListener('click', ()=>{
-          // If LLM analysis is disabled, prompt user to enable it first
-          const llmEnabled = document.getElementById('enable-llm') && document.getElementById('enable-llm').checked;
-          if (!llmEnabled) {
-            if (!confirm('LLM analysis is currently disabled. Enable LLM analysis to ask follow-up questions?')) return;
-            document.getElementById('enable-llm').checked = true;
-          }
-          // Toggle/create follow-up UI below the card
-          let fw = el.querySelector('.followup-wrap');
-          if (!fw) {
-            // createOrUpdateEntry will create the followup UI when invoked with the current entry
-            createOrUpdateEntry(entry);
-            setTimeout(()=>{ const fw2 = el.querySelector('.followup-wrap'); if (fw2) { const btn = fw2.querySelector('button'); if (btn) btn.click(); } }, 50);
-          } else {
-            const toggleBtn = fw.querySelector('button'); if (toggleBtn) toggleBtn.click();
-          }
+    // Render consolidated AI result into the AI console (primary display)
+    function showAiResult(script, displayHtml, rawText) {
+      const consoleEl = getAiConsole();
+      let sec = document.getElementById(`ai-result-${script}`);
+      if (!sec) {
+        sec = document.createElement('div'); sec.id = `ai-result-${script}`; sec.style.borderTop = '1px solid #eee'; sec.style.padding = '8px 0';
+        const header = document.createElement('div'); header.style.display='flex'; header.style.alignItems='center'; header.style.justifyContent='space-between';
+        header.innerHTML = `<strong>[${script}] AI SECURITY RECOMMENDATIONS</strong>`;
+        const right = document.createElement('div'); right.style.display='flex'; right.style.alignItems='center';
+        const stopBtn = document.createElement('button'); stopBtn.textContent = 'Stop'; stopBtn.className='btn ghost'; stopBtn.style.marginLeft='8px';
+        stopBtn.addEventListener('click', async ()=>{
+          if (!confirm('Stop this test?')) return; stopBtn.disabled = true; stopBtn.textContent = 'Stopping...';
+          try { const r = await fetch('?action=stop_script', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ script: script }) }); const j = await r.json(); const note = document.createElement('div'); note.style.fontSize='12px'; note.style.color='#666'; note.style.marginTop='6px'; note.textContent = (j && j.ok) ? 'Stop requested' : ('Stop failed: ' + (j.error || '')); sec.appendChild(note); setCardStatus(script, 'Stopping', 'error'); } catch (e) { alert('Stop request failed: ' + String(e)); } finally { stopBtn.disabled = false; stopBtn.textContent = 'Stop'; }
         });
-        const right = document.createElement('div'); right.style.display='flex'; right.style.alignItems='center'; right.appendChild(followBtn);
-        header.appendChild(title); header.appendChild(right); el.appendChild(header);
-
-        const cmdPre = document.createElement('pre'); cmdPre.className='cmd'; cmdPre.style.background='#f0f8ff'; cmdPre.style.padding='6px'; cmdPre.style.borderLeft='4px solid #cce'; cmdPre.style.display='none'; cmdPre.style.whiteSpace='pre-wrap'; el.appendChild(cmdPre);
-        const pre=document.createElement('pre'); pre.className='stdout'; el.appendChild(pre);
-        const err=document.createElement('pre'); err.className='stderr'; el.appendChild(err);
-        const findings=document.createElement('div'); findings.className='findings'; el.appendChild(findings);
-        res.appendChild(el);
+        right.appendChild(stopBtn);
+        header.appendChild(right); sec.appendChild(header);
+        const body = document.createElement('div'); body.className='ai-result-body'; body.style.marginTop='6px'; sec.appendChild(body);
+        const rawEl = document.createElement('pre'); rawEl.className='ai-raw'; rawEl.style.whiteSpace='pre-wrap'; rawEl.style.display = 'none'; sec.appendChild(rawEl);
+        consoleEl.appendChild(sec);
       }
-      el.querySelector('pre.stdout').textContent = entry.stdout || '';
-      const errEl = el.querySelector('pre.stderr'); errEl.textContent = entry.stderr || ''; errEl.style.display = entry.stderr ? 'block' : 'none';
-      const fEl = el.querySelector('.findings'); if (entry.findings && entry.findings.length){ fEl.innerHTML = '<strong>Findings:</strong><ul>' + entry.findings.map(x=>`<li>${x}</li>`).join('') + '</ul>'; } else { fEl.innerHTML = ''; }
-      // AI analysis
-      let aiEl = el.querySelector('.ai-analysis');
-      if (!aiEl) { aiEl = document.createElement('div'); aiEl.className = 'ai-analysis'; aiEl.style.marginTop = '8px'; aiEl.style.background = '#fff8f0'; aiEl.style.padding = '10px'; aiEl.style.borderLeft = '4px solid #ffc107'; el.appendChild(aiEl); }
-      // Only update AI analysis if the server explicitly provided a non-empty value in the entry object.
-      // This avoids clobbering client-added analysis when subsequent server results send empty strings.
-      if (typeof entry.ai_analysis !== 'undefined' && entry.ai_analysis !== null && String(entry.ai_analysis).trim() !== '') {
-        // Try to parse raw assistant reply (entry.ai_raw) or ai_analysis as JSON and render human-friendly fields
+      const body = sec.querySelector('.ai-result-body'); body.innerHTML = displayHtml || '';
+      const rawEl = sec.querySelector('.ai-raw'); rawEl.textContent = rawText || '';
+      rawEl.style.display = (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked && rawEl.textContent) ? 'block' : 'none';
+      // ensure follow-up UI exists for this script
+      try { ensureAiConsoleSection(script, 'Analyze the following AI result and provide remediation suggestions.'); } catch(e){ console.error('ensureAiConsoleSection failed', e); }
+    }
+
+    function createOrUpdateEntry(entry){
+      // Ensure results container exists
+      let resultsEl = document.getElementById('results');
+      if (!resultsEl) { resultsEl = document.createElement('div'); resultsEl.id = 'results'; const summary = document.getElementById('summary'); if (summary && summary.parentNode) summary.parentNode.insertBefore(resultsEl, summary); else document.body.appendChild(resultsEl); }
+
+      // Ensure a per-script section exists for inline output/debug
+      let sec = document.querySelector(`section.script-result[data-script="${entry.script}"]`);
+      if (!sec) {
+        sec = document.createElement('section'); sec.className = 'script-result'; sec.setAttribute('data-script', entry.script);
+        const h = document.createElement('h4'); h.textContent = entry.script; sec.appendChild(h);
+        const preStdout = document.createElement('pre'); preStdout.className = 'stdout'; preStdout.textContent = entry.stdout || ''; sec.appendChild(preStdout);
+        const preStderr = document.createElement('pre'); preStderr.className = 'stderr'; preStderr.style.display = (entry.stderr && entry.stderr.length) ? 'block' : 'none'; preStderr.textContent = entry.stderr || ''; sec.appendChild(preStderr);
+        // placeholders for ai analysis/raw
+        const aiAnal = document.createElement('div'); aiAnal.className='ai-analysis'; aiAnal.style.marginTop='8px'; sec.appendChild(aiAnal);
+        const rawEl = document.createElement('div'); rawEl.className='ai-raw'; rawEl.style.marginTop='8px'; rawEl.style.display='none'; sec.appendChild(rawEl);
+        resultsEl.appendChild(sec);
+      } else {
+        // update stdout/stderr if provided
+        const preStdout = sec.querySelector('pre.stdout'); if (preStdout && typeof entry.stdout !== 'undefined') preStdout.textContent = entry.stdout;
+        const preStderr = sec.querySelector('pre.stderr'); if (preStderr && typeof entry.stderr !== 'undefined') { preStderr.textContent = entry.stderr; preStderr.style.display = entry.stderr ? 'block' : 'none'; }
+      }
+
+      // When 'results' are emitted, surface AI analysis in the consolidated AI console
+      if (entry.ai_analysis) {
         let rendered = '';
         let rawText = entry.ai_raw || entry.ai_analysis || '';
-        let parsed = null;
-        try { parsed = JSON.parse(rawText); } catch (e) { parsed = null; }
-        if (parsed && typeof parsed === 'object') {
-          const parts = [];
-          if (parsed.summary) parts.push('Summary: ' + parsed.summary);
-          if (parsed.remediation) {
-            if (Array.isArray(parsed.remediation)) parts.push('Remediation: ' + parsed.remediation.join('; ')); else parts.push('Remediation: ' + parsed.remediation);
-          }
-          if (parsed.notes) parts.push('Notes: ' + parsed.notes);
-          if (parts.length) rendered = '<div style="white-space:pre-wrap;">' + parts.join('\n\n') + '</div>';
-          else rendered = '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>';
-        } else {
-          // fallback: show the already-prepared analysis string (may be machine-concatenated by server)
-          rendered = '<div style="white-space:pre-wrap;">' + entry.ai_analysis + '</div>';
-        }
-        aiEl.innerHTML = '<strong>AI SECURITY ANALYSIS:</strong><div style="margin-top:6px;">' + rendered + '</div>';
+        try { const parsed = JSON.parse(rawText); if (parsed && typeof parsed === 'object') { let parts = []; if (parsed.summary) parts.push('Summary: ' + parsed.summary); if (parsed.remediation) parts.push('Remediation: ' + (Array.isArray(parsed.remediation) ? parsed.remediation.join('; ') : parsed.remediation)); if (parsed.notes) parts.push('Notes: ' + parsed.notes); if (parts.length) rendered = '<div style="white-space:pre-wrap;">' + parts.join('\n\n') + '</div>'; else rendered = '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>'; } } catch(e){ rendered = '<div style="white-space:pre-wrap;">' + entry.ai_analysis + '</div>'; }
+        showAiResult(entry.script, rendered, rawText);
+        // also update per-section ai-analysis/raw
+        const aiAnalEl = sec.querySelector('.ai-analysis'); if (aiAnalEl) { aiAnalEl.innerHTML = '<strong>AI SECURITY ANALYSIS (live):</strong><div style="margin-top:6px;white-space:pre-wrap;">' + (entry.ai_analysis || '') + '</div>'; }
+        const rawEl = sec.querySelector('.ai-raw'); if (rawEl) { rawEl.textContent = entry.ai_raw || entry.ai_analysis || ''; rawEl.style.display = (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked && rawEl.textContent) ? 'block' : 'none'; }
       }
-      // show command that was executed (if available)
-      const cmdEl = el.querySelector('pre.cmd'); if (entry.cmd) { cmdEl.textContent = entry.cmd; cmdEl.style.display = 'block'; } else { cmdEl.style.display = 'none'; }
-      // raw debug area (hidden unless "Show LLM debug" checked)
-      let rawEl = el.querySelector('.ai-raw');
-      if (!rawEl) { rawEl = document.createElement('div'); rawEl.className = 'ai-raw'; rawEl.style.marginTop = '8px'; rawEl.style.background = '#f6f6f6'; rawEl.style.padding = '8px'; rawEl.style.borderLeft = '4px solid #ccc'; rawEl.style.display = 'none'; el.appendChild(rawEl); }
-      if (typeof entry.ai_raw !== 'undefined' && entry.ai_raw !== null && String(entry.ai_raw).trim() !== '') { rawEl.textContent = entry.ai_raw; }
-      // toggle visibility based on UI checkbox
-      const showDebug = document.getElementById('show-llm-debug');
-      if (showDebug && showDebug.checked && rawEl.textContent) rawEl.style.display = 'block'; else rawEl.style.display = 'none';
 
-      // Follow-up UI: button -> show textarea
-      let followWrap = el.querySelector('.followup-wrap');
-      if (!followWrap) {
-        followWrap = document.createElement('div'); followWrap.className='followup-wrap'; followWrap.style.marginTop='8px';
-        const btn = document.createElement('button'); btn.textContent='Ask follow-up'; btn.className='btn ghost'; btn.style.marginRight='8px';
-        const area = document.createElement('textarea'); area.rows=3; area.style.width='100%'; area.style.display='none'; area.placeholder='Ask a follow-up question about this test...';
-        const send = document.createElement('button'); send.textContent='Send'; send.className='btn'; send.style.display='none'; send.style.marginTop='6px';
-        const respDiv = document.createElement('div'); respDiv.className='followup-response'; respDiv.style.marginTop='8px';
-        followWrap.appendChild(btn); followWrap.appendChild(area); followWrap.appendChild(send); followWrap.appendChild(respDiv);
-        el.appendChild(followWrap);
-
-        btn.addEventListener('click', ()=>{ if (area.style.display==='none'){ area.style.display='block'; send.style.display='inline-block'; area.focus(); } else { area.style.display='none'; send.style.display='none'; } });
-        send.addEventListener('click', async ()=>{
-          const q = area.value && area.value.trim(); if (!q) { alert('Enter a question'); return; }
-          send.disabled = true; send.textContent = 'Asking...';
-          try {
-            // Build a prompt including context and the user's question
-            // Respect response mode: structured vs free-text
-            const mode = (document.getElementById('llm-response-mode') && document.getElementById('llm-response-mode').value) || 'structured';
-            const provider = document.getElementById('llm-provider')?.value || '';
-            // Send the previous assistant reply as conversation context for better follow-ups
-            const contextText = (entry.ai_raw || entry.ai_analysis || entry.stdout || '').slice(0,2000);
-            const payload = { prompt: q, provider: provider, conversation: [{ role: 'assistant', content: contextText }] };
-            if (mode === 'structured') payload.system_prompt = FOLLOWUP_SYSTEM_PROMPT;
-            const r = await fetch(LLM_SERVER_URL, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-            const j = await r.json();
-            let display = 'No reply';
-            let rawResp = '';
-            if (j && typeof j.response !== 'undefined') {
-              rawResp = String(j.response || '');
-              // Try to parse any JSON reply and render as human-readable fields if possible
-              let parsed = null;
-              try { parsed = JSON.parse(rawResp); } catch (err) { parsed = null; }
-              if (parsed && typeof parsed === 'object') {
-                // Prefer fields summary/remediation/notes if present
-                let parts = [];
-                if (parsed.summary) parts.push('Summary: ' + parsed.summary);
-                if (parsed.remediation) {
-                  if (Array.isArray(parsed.remediation)) parts.push('Remediation: ' + parsed.remediation.join('; ')); else parts.push('Remediation: ' + parsed.remediation);
-                }
-                if (parsed.notes) parts.push('Notes: ' + parsed.notes);
-                // If we assembled parts, show them nicely; otherwise fall back to showing parsed JSON
-                if (parts.length) {
-                  display = '<div style="white-space:pre-wrap;">' + parts.join('\n\n') + '</div>';
-                } else if (mode === 'structured') {
-                  // existing structured validation for answer/severity/confidence
-                  const v = validateStructured(parsed);
-                  let warn = '';
-                  if (!v.ok) { warn = `<div style="color:#a00;margin-bottom:8px">Warning: structured response missing fields: ${v.missing.join(', ')}</div>`; }
-                  display = warn + '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>';
-                } else {
-                  display = '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>';
-                }
-              } else {
-                // non-JSON reply
-                if (mode === 'structured') {
-                  display = '<div style="color:#a00;margin-bottom:8px">Warning: expected JSON structured reply but assistant returned non-JSON text.</div><pre style="white-space:pre-wrap;">' + rawResp + '</pre>';
-                } else {
-                  display = '<pre style="white-space:pre-wrap;">' + rawResp + '</pre>';
-                }
-              }
-            }
-            respDiv.innerHTML = '<strong>Follow-up reply:</strong>' + display;
-            // show raw debug (attach as data-raw so global toggle can control visibility)
-            if (rawResp) {
-              const dbg = document.createElement('pre'); dbg.style.whiteSpace='pre-wrap'; dbg.textContent = rawResp; dbg.setAttribute('data-raw','1'); dbg.style.display = (document.getElementById('show-llm-debug') && document.getElementById('show-llm-debug').checked) ? 'block' : 'none'; respDiv.appendChild(dbg);
-            }
-          } catch (e) {
-            respDiv.innerHTML = '<span style="color:#a00">Request failed: '+String(e)+'</span>';
-          } finally { send.disabled = false; send.textContent='Send'; }
-        });
-      }
-      // update card status
+      // update card status visually
       setCardStatus(entry.script, entry.stderr ? 'Error' : (entry.findings && entry.findings.length ? 'Done' : 'Done'), entry.stderr ? 'error' : 'done');
     }
 
@@ -381,9 +295,15 @@ const provider = document.getElementById('llm-provider')?.value || '';
     }
 
     async function runSelected(){
-      const url = document.getElementById('url').value;
-      const checks = Array.from(document.querySelectorAll('#tests input:checked')).map(i=>i.value);
-      const ports = document.getElementById('ports').value;
+      // Defensive DOM access to avoid null dereferences when elements are missing
+      const urlEl = document.getElementById('url');
+      if (!urlEl) { alert('Target input (id="url") not found on page'); return; }
+      const url = (urlEl.value || '').trim();
+      const checksEls = document.querySelectorAll('#tests input:checked');
+      const checks = checksEls ? Array.from(checksEls).map(i=>i.value) : [];
+      const portsEl = document.getElementById('ports');
+      const ports = portsEl ? portsEl.value : '';
+
       if(!url){alert('Enter a target URL'); return;}
       if (!checks.length) { alert('Select at least one test'); return; }
       
@@ -391,22 +311,22 @@ const provider = document.getElementById('llm-provider')?.value || '';
       const llm_timeout_ovr = document.getElementById('llm-timeout-override')?.value;
       const llm_retries_ovr = document.getElementById('llm-retries-override')?.value;
 
-      // clear previous results and summary
-      document.getElementById('results').innerHTML = ''; document.getElementById('summary').innerHTML = '';
+      // clear previous results and summary (safe)
+      const resultsEl = document.getElementById('results'); if (resultsEl) resultsEl.innerHTML = '';
+      const summaryEl = document.getElementById('summary'); if (summaryEl) summaryEl.innerHTML = '';
       _autoAsked.clear();
-      const aiConsole = document.getElementById('ai-console');
-      if (aiConsole) aiConsole.innerHTML = ''; // safe: only clear if present
+      const aiConsole = document.getElementById('ai-console'); if (aiConsole) aiConsole.innerHTML = '';
 
       // mark selected cards running
       checks.forEach(s=>setCardRunning(s));
       // setup per-card progress and global progress
       let totalScripts = checks.length; let completedScripts = 0;
-      document.getElementById('global-progress-bar').style.width = '5%';
+      const globalBar = document.getElementById('global-progress-bar'); if (globalBar) globalBar.style.width = '5%';
 
       // create an AbortController for this run so the UI can cancel it
       window.currentAbortController = new AbortController();
       const resp = await fetch('?stream=1', {method:'POST', headers:{'Content-Type':'application/json','X-Stream':'1'}, body: JSON.stringify({
-        url, 
+        url,
         tests: checks, 
         ports, 
         scan_type: document.getElementById('nmap-scan-type').value, 
@@ -423,7 +343,7 @@ const provider = document.getElementById('llm-provider')?.value || '';
       if (!resp.body) { alert('Streaming not available; server did not return a stream.'); return; }
       const reader = resp.body.getReader();
       const decoder = new TextDecoder(); let buf = '';
-      while(true){ const {value, done} = await reader.read(); if (done) break; buf += decoder.decode(value, {stream:true}); let lines = buf.split(/\n/); buf = lines.pop(); for(const line of lines){ if(!line) continue; if (line === 'STREAM-START') { document.getElementById('results').innerHTML = ''; continue; } if (line === 'STREAM-END') continue; try{ 
+      while(true){ const {value, done} = await reader.read(); if (done) break; buf += decoder.decode(value, {stream:true}); let lines = buf.split(/\n/); buf = lines.pop(); for(const line of lines){ if(!line) continue; if (line === 'STREAM-START') { if (resultsEl) resultsEl.innerHTML = ''; continue; } if (line === 'STREAM-END') continue; try{ 
         const obj = JSON.parse(line);
         processStreamLine(obj);
         if (obj.type === 'start') {
@@ -432,10 +352,10 @@ const provider = document.getElementById('llm-provider')?.value || '';
           finishCardProgress(obj.entry.script);
           completedScripts++;
           const pct = Math.round((completedScripts/totalScripts)*100);
-          document.getElementById('global-progress-bar').style.width = pct + '%';
+          if (globalBar) globalBar.style.width = pct + '%';
         }
       } catch(e){ console.error('parse', e, line); } } }
-      document.getElementById('global-progress-bar').style.width = '100%';
+      if (globalBar) globalBar.style.width = '100%';
       // finalize statuses for any remaining selected
       checks.forEach(s=>{ finishCardProgress(s); setCardStatus(s, 'Done', 'done'); });
       // clear controller
@@ -446,8 +366,9 @@ const provider = document.getElementById('llm-provider')?.value || '';
       const url=document.getElementById('url').value; const level=document.getElementById('level').value;
       const ports = document.getElementById('ports').value;
       if(!url){alert('Enter a target URL'); return;}
-      // clear previous results and summary
-      document.getElementById('results').innerHTML = ''; document.getElementById('summary').innerHTML = '';
+      // clear previous results and summary (safe)
+      const resultsEl = document.getElementById('results'); if (resultsEl) resultsEl.innerHTML = '';
+      const summaryEl = document.getElementById('summary'); if (summaryEl) summaryEl.innerHTML = '';
       _autoAsked.clear();
       // mark all cards running visually (server will emit start/result for actual ones)
       Array.from(document.querySelectorAll('#tests input')).map(i=>i.value).forEach(s=>setCardRunning(s));
@@ -507,11 +428,13 @@ const provider = document.getElementById('llm-provider')?.value || '';
 
     // Run all via streaming fetch; server emits JSON-per-line for each result and a summary
     async function runAll(){
-      const url=document.getElementById('url').value; if(!url){alert('Enter a target URL'); return;}
-      document.getElementById('results').innerHTML = '<em>Running...</em>'; document.getElementById('summary').innerHTML = '';
+      const urlEl = document.getElementById('url');
+      if (!urlEl) { alert('Target input (id="url") not found on page'); return; }
+      const url = (urlEl.value || '').trim(); if(!url){alert('Enter a target URL'); return;}
+      const resultsEl = document.getElementById('results'); if (resultsEl) resultsEl.innerHTML = '<em>Running...</em>';
+      const summaryEl = document.getElementById('summary'); if (summaryEl) summaryEl.innerHTML = '';
       _autoAsked.clear();
-      document.getElementById('ai-console').innerHTML = '';
-
+      const aiConsoleEl = document.getElementById('ai-console'); if (aiConsoleEl) aiConsoleEl.innerHTML = '';
       const r = await fetch('?action=scripts'); const data = await r.json();
       const llm_url_ovr = document.getElementById('llm-url-override')?.value || '';
       const llm_timeout_ovr = document.getElementById('llm-timeout-override')?.value || '';
@@ -529,13 +452,15 @@ const provider = document.getElementById('llm-provider')?.value || '';
       if (!resp.body) { alert('Streaming not available; server did not return a stream.'); return; }
       const reader = resp.body.getReader();
       const decoder = new TextDecoder(); let buf = '';
-      while(true){ const {value, done} = await reader.read(); if (done) break; buf += decoder.decode(value, {stream:true}); let lines = buf.split(/\n/); buf = lines.pop(); for(const line of lines){ if(!line) continue; if (line === 'STREAM-START') { document.getElementById('results').innerHTML = ''; continue; } if (line === 'STREAM-END') continue; try{ processStreamLine(JSON.parse(line)); } catch(e){ console.error('parse', e, line); } } }
+      while(true){ const {value, done} = await reader.read(); if (done) break; buf += decoder.decode(value, {stream:true}); let lines = buf.split(/\n/); buf = lines.pop(); for(const line of lines){ if(!line) continue; if (line === 'STREAM-START') { if (resultsEl) resultsEl.innerHTML = ''; continue; } if (line === 'STREAM-END') continue; try{ processStreamLine(JSON.parse(line)); } catch(e){ console.error('parse', e, line); } } }
     }
 
     function processStreamLine(data) {
-      const resDiv = document.getElementById('results');
-      const sumDiv = document.getElementById('summary');
-      const aiConsole = document.getElementById('ai-console');
+      // Ensure top-level containers exist (create if missing) to avoid null refs
+      let resDiv = document.getElementById('results');
+      if (!resDiv) { resDiv = document.createElement('div'); resDiv.id = 'results'; const summary = document.getElementById('summary'); if (summary && summary.parentNode) summary.parentNode.insertBefore(resDiv, summary); else document.body.appendChild(resDiv); }
+      let sumDiv = document.getElementById('summary'); if (!sumDiv) { sumDiv = document.createElement('div'); sumDiv.id='summary'; document.body.appendChild(sumDiv); }
+      let aiConsole = document.getElementById('ai-console'); if (!aiConsole) { aiConsole = document.createElement('div'); aiConsole.id = 'ai-console'; aiConsole.style.marginTop='8px'; const summary = document.getElementById('summary'); if (summary && summary.parentNode) summary.parentNode.insertBefore(aiConsole, summary.nextSibling); else document.body.appendChild(aiConsole); }
 
       if (data.type === 'start') {
         let scriptDiv = document.getElementById(`script-${data.script}`);
@@ -648,10 +573,21 @@ const provider = document.getElementById('llm-provider')?.value || '';
                 statusPre.parentNode.insertBefore(inline, statusPre.nextSibling);
               }
               // Prefer server-provided analysis or raw fallback
-              const inlineText = (data.analysis && String(data.analysis).trim() !== '') ? ('<strong>AI:</strong> ' + data.analysis) : ((data.raw && String(data.raw).trim() !== '') ? ('<pre style="white-space:pre-wrap;">' + data.raw + '</pre>') : '');
+              const inlineText = (data.analysis && String(data.analysis).trim() !== '') ? ('<strong>AI SECURITY RECOMMENDATIONS:</strong> ' + data.analysis) : ((data.raw && String(data.raw).trim() !== '') ? ('<pre style="white-space:pre-wrap;">' + data.raw + '</pre>') : '');
               if (inlineText) inline.innerHTML = inlineText;
             }
           } catch (e) { console.error('attach inline analysis failed', e); }
+
+          // Also ensure consolidated AI console shows this result
+          try {
+            let rendered = '';
+            if (data.analysis) {
+              try { const parsed = JSON.parse(data.analysis); if (parsed && typeof parsed === 'object') { let parts = []; if (parsed.summary) parts.push('Summary: ' + parsed.summary); if (parsed.remediation) parts.push('Remediation: ' + (Array.isArray(parsed.remediation) ? parsed.remediation.join('; ') : parsed.remediation)); if (parsed.notes) parts.push('Notes: ' + parsed.notes); if (parts.length) rendered = '<div style="white-space:pre-wrap;">' + parts.join('\n\n') + '</div>'; else rendered = '<pre style="white-space:pre-wrap;">' + JSON.stringify(parsed, null, 2) + '</pre>'; } } catch(e){ rendered = '<div style="white-space:pre-wrap;">' + data.analysis + '</div>'; }
+              showAiResult(data.script, rendered, data.raw || '');
+            } else if (data.raw) {
+              showAiResult(data.script, '<pre style="white-space:pre-wrap;">' + data.raw + '</pre>', data.raw || '');
+            }
+          } catch (e) { console.error('showAiResult failed', e); }
 
           // create a per-script ai-console section (so users can ask follow-ups from the ai-console as well)
           try {
@@ -673,7 +609,7 @@ const provider = document.getElementById('llm-provider')?.value || '';
       }
     }
 
-    function renderResults(data){ const sum=document.getElementById('summary'); const res=document.getElementById('results'); res.innerHTML=''; sum.innerHTML=''; if(data.summary && data.summary.length){ const ul=document.createElement('ul'); data.summary.forEach(s=>{const li=document.createElement('li'); li.textContent=s; ul.appendChild(li)}); sum.appendChild(ul);} else sum.textContent='No findings'; data.results.forEach(r=>{createOrUpdateEntry(r);}); }
+    function renderResults(data){ const sum=document.getElementById('summary'); sum.innerHTML=''; if(data.summary && data.summary.length){ const ul=document.createElement('ul'); data.summary.forEach(s=>{const li=document.createElement('li'); li.textContent=s; ul.appendChild(li)}); sum.appendChild(ul);} else sum.textContent='No findings'; if (data.results && Array.isArray(data.results)) data.results.forEach(r=>{ createOrUpdateEntry(r); }); }
 
     // Attach UI event handlers safely after DOM is ready and add LLM debug toggle
     document.addEventListener('DOMContentLoaded', ()=>{

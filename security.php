@@ -310,17 +310,24 @@ if ($method === 'GET' && $action === 'scripts') {
 // Stop control endpoints (create/clear a stop-flag file)
 // Session-specific files are used (see top of file)
 // $stop_file and $pid_file are already defined per-session.
-// helper: add pid to pid file
-function add_pid_to_file($pid_file, $pid) {
+// helper: add pid to pid file (optionally include a script label)
+function add_pid_to_file($pid_file, $pid, $label = '') {
   if (!$pid) return;
-  @file_put_contents($pid_file, $pid . "\n", FILE_APPEND | LOCK_EX);
+  $safe_label = $label ? preg_replace('/[^A-Za-z0-9_\-]/', '_', $label) : '';
+  $line = intval($pid) . ($safe_label ? '|' . $safe_label : '');
+  @file_put_contents($pid_file, $line . "\n", FILE_APPEND | LOCK_EX);
 }
 function remove_pid_from_file($pid_file, $pid) {
   if (!file_exists($pid_file)) return;
   $data = @file($pid_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
   if (!$data) { @unlink($pid_file); return; }
-  $data = array_filter($data, function($v) use ($pid) { return trim($v) != trim($pid); });
-  if (count($data)) @file_put_contents($pid_file, implode("\n", $data) . "\n", LOCK_EX); else @unlink($pid_file);
+  $out = array();
+  foreach ($data as $v) {
+    $parts = explode('|', trim($v), 2);
+    $existing_pid = intval($parts[0]);
+    if ($existing_pid !== intval($pid)) $out[] = $v;
+  }
+  if (count($out)) @file_put_contents($pid_file, implode("\n", $out) . "\n", LOCK_EX); else @unlink($pid_file);
 }
 if ($method === 'POST' && $action === 'stop_all') {
   @file_put_contents($stop_file, "1");
@@ -328,8 +335,10 @@ if ($method === 'POST' && $action === 'stop_all') {
   if (file_exists($pid_file)) {
     $pids = file($pid_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     if ($pids) {
-      foreach ($pids as $pid) {
-        $pid = intval($pid);
+      foreach ($pids as $line) {
+        $parts = explode('|', trim($line), 2);
+        $pid = intval($parts[0]);
+        $label = isset($parts[1]) ? $parts[1] : '';
         if ($pid <= 0) continue;
         // Best-effort: try to terminate the process, its group, and its children.
         // 1) posix_kill on PID
@@ -359,6 +368,40 @@ if ($method === 'POST' && $action === 'clear_stop') {
   if (file_exists($stop_file)) { @unlink($stop_file); }
   if (file_exists($pid_file)) { @unlink($pid_file); }
   respond_json(array('ok' => true, 'msg' => 'cleared'));
+}
+
+// Stop a specific script by script name (POST JSON {script: 'traceroute'})
+if ($method === 'POST' && $action === 'stop_script') {
+  $body = json_decode(file_get_contents('php://input'), true);
+  $script = isset($body['script']) ? $body['script'] : (isset($_POST['script']) ? $_POST['script'] : '');
+  if (!$script) { respond_json(array('error' => 'Missing script')); }
+  $killed = array();
+  if (!file_exists($pid_file)) { respond_json(array('ok' => true, 'killed' => $killed)); }
+  $lines = file($pid_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+  $remain = array();
+  foreach ($lines as $line) {
+    $parts = explode('|', trim($line), 2);
+    $pid = intval($parts[0]);
+    $label = isset($parts[1]) ? $parts[1] : '';
+    if ($label === $script) {
+      if ($pid > 0) {
+        // best-effort kill sequence similar to stop_all
+        if (function_exists('posix_kill')) { @posix_kill($pid, SIGTERM); }
+        @exec("kill -TERM $pid 2>/dev/null");
+        @exec("kill -TERM -$pid 2>/dev/null");
+        usleep(200000);
+        @exec("pkill -P $pid 2>/dev/null");
+        if (function_exists('posix_kill')) { @posix_kill($pid, SIGKILL); }
+        @exec("kill -KILL $pid 2>/dev/null");
+        @exec("kill -KILL -$pid 2>/dev/null");
+      }
+      $killed[] = array('pid' => $pid, 'script' => $label);
+    } else {
+      $remain[] = $line;
+    }
+  }
+  if (count($remain)) @file_put_contents($pid_file, implode("\n", $remain) . "\n", LOCK_EX); else { @unlink($pid_file); }
+  respond_json(array('ok' => true, 'killed' => $killed));
 }
 
 // Handle LLM connection test
@@ -565,7 +608,7 @@ if ($method === 'POST') {
         if (is_resource($process)) {
           $pinfo = proc_get_status($process);
           $ppid = isset($pinfo['pid']) ? intval($pinfo['pid']) : 0;
-          if ($ppid) { add_pid_to_file($pid_file, $ppid); }
+          if ($ppid) { add_pid_to_file($pid_file, $ppid, $t); }
           fclose($pipes[0]);
           stream_set_blocking($pipes[1], false);
           stream_set_blocking($pipes[2], false);
@@ -676,7 +719,7 @@ if ($method === 'POST') {
         if (is_resource($process)) {
           $pinfo = proc_get_status($process);
           $ppid = isset($pinfo['pid']) ? intval($pinfo['pid']) : 0;
-          if ($ppid) { add_pid_to_file($pid_file, $ppid); }
+          if ($ppid) { add_pid_to_file($pid_file, $ppid, $t); }
           fclose($pipes[0]);
           stream_set_blocking($pipes[1], false);
           stream_set_blocking($pipes[2], false);
@@ -798,7 +841,7 @@ if ($method === 'POST') {
         // track pid for stop/kill support
         $pinfo = proc_get_status($process);
         $ppid = isset($pinfo['pid']) ? intval($pinfo['pid']) : 0;
-        if ($ppid) { add_pid_to_file($pid_file, $ppid); }
+        if ($ppid) { add_pid_to_file($pid_file, $ppid, $t); }
         fclose($pipes[0]);
         stream_set_blocking($pipes[1], false);
         stream_set_blocking($pipes[2], false);
@@ -1039,15 +1082,14 @@ if ($method === 'POST') {
 
   <h3>Summary</h3>
   <div id="summary"></div>
-  <!-- LLM debug / prompt console (populated during scanning when LLM prompts are emitted) -->
+  <!-- Primary AI security analysis console (consolidated per-script AI results) -->
+  <h3>AI SECURITY ANALYSIS</h3>
   <div id="ai-console" style="margin-top:8px"></div>
   <div id="global-progress" style="margin:12px 0">
     <div style="height:10px;background:#eef5ff;border-radius:8px;overflow:hidden">
       <div id="global-progress-bar" style="height:10px;width:0%;background:linear-gradient(90deg,var(--accent),#6cc1ff);transition:width .2s;border-radius:8px"></div>
     </div>
   </div>
-  <h3>Results</h3>
-  <div id="results"></div>
 
   <script>
     // Configuration from PHP environment - defined globally for static/security.js
